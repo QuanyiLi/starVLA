@@ -37,7 +37,7 @@ srun torchrun \
     --framework.action_model.action_model_type "DiT-B" \
     --datasets.vla_data.data_root_dir /work/vita/lanfeng/vlas/vla/wiser_dataset \
     --datasets.vla_data.data_mix wiser_panda \
-    --datasets.vla_data.per_device_batch_size 8 \
+    --datasets.vla_data.per_device_batch_size 4 \
     --datasets.vla_data.lerobot_version "v3.0" \
     --datasets.vla_data.video_backend pyav \
     --trainer.freeze_modules '' \

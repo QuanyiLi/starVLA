@@ -15,7 +15,29 @@ export MASTER_PORT=29500
 export CC=gcc
 export WANDB_MODE=disabled
 export DS_BUILD_OPS=0
-export CUDA_HOME=$(python -c "import torch.utils.cpp_extension; print(torch.utils.cpp_extension.CUDA_HOME or '')" 2>/dev/null)
+
+# --- Find CUDA_HOME ---
+# Try 1: nvcc in PATH
+if command -v nvcc &>/dev/null; then
+    export CUDA_HOME=$(dirname $(dirname $(which nvcc)))
+# Try 2: Common locations
+elif [ -d "/usr/local/cuda" ]; then
+    export CUDA_HOME=/usr/local/cuda
+# Try 3: spack-installed cuda (search for nvcc)
+else
+    NVCC_PATH=$(find /ssoft/spack -name nvcc -type f 2>/dev/null | grep -v nvhpc | head -n 1)
+    if [ -n "$NVCC_PATH" ]; then
+        export CUDA_HOME=$(dirname $(dirname "$NVCC_PATH"))
+    else
+        # Try 4: nvhpc bundled cuda
+        NVHPC_CUDA=$(find /ssoft/spack -path "*/cuda/*/bin/nvcc" -type f 2>/dev/null | head -n 1)
+        if [ -n "$NVHPC_CUDA" ]; then
+            export CUDA_HOME=$(dirname $(dirname "$NVHPC_CUDA"))
+        fi
+    fi
+fi
+echo "CUDA_HOME=${CUDA_HOME:-NOT_FOUND}"
+echo "nvcc=$(which nvcc 2>/dev/null || echo NOT_FOUND)"
 
 STARVLA_ROOT=/work/vita/lanfeng/vlas/starVLA
 

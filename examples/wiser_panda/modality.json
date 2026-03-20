@@ -1,0 +1,31 @@
+{
+    "state": {
+        "q_pos": {
+            "start": 0,
+            "end": 9,
+            "original_key": "observation.state",
+            "absolute": true,
+            "dtype": "float32"
+        }
+    },
+    "action": {
+        "q_pos": {
+            "start": 0,
+            "end": 8,
+            "original_key": "action",
+            "absolute": true,
+            "dtype": "float32"
+        }
+    },
+    "video": {
+        "image_1": {
+            "original_key": "observation.images.image_1"
+        },
+        "wrist_image": {
+            "original_key": "observation.images.wrist_image"
+        }
+    },
+    "annotation": {
+        "human.action.task_description": {"original_key": "task_index"}
+    }
+}

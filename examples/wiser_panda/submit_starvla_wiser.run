@@ -59,7 +59,7 @@ srun --kill-on-bad-exit=1 \
     --config_file ${DEEPSPEED_CFG} \
     --main_process_ip ${MASTER_ADDR} \
     --main_process_port ${MASTER_PORT} \
-    --machine_rank \$SLURM_PROCID \
+    --machine_rank $SLURM_PROCID \
     --num_machines ${NNODES} \
     --num_processes ${TOTAL_GPUS} \
     ${STARVLA_ROOT}/starVLA/training/train_starvla.py \

@@ -35,7 +35,7 @@ CONFIG_YAML=${STARVLA_ROOT}/examples/wiser_panda/starvla_cotrain_wiser.yaml
 DEEPSPEED_CFG=${STARVLA_ROOT}/starVLA/config/deepseeds/deepspeed_zero2.yaml
 
 Framework_name=QwenGR00T
-base_vlm=${STARVLA_ROOT}/playground/Pretrained_models/Qwen2.5-VL-3B-Instruct
+base_vlm=${STARVLA_ROOT}/playground/Pretrained_models/Qwen3.5-VL-9B-Instruct
 DIT_TYPE="DiT-B"
 freeze_module_list=''     # SOTA: fully fine-tuned
 

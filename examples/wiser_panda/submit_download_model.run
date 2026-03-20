@@ -10,7 +10,7 @@
 #SBATCH --time=2:00:00
 #SBATCH --mem=32G
 
-TARGET_DIR=/work/vita/lanfeng/vlas/startVLA/playground/Pretrained_models/Qwen3.5-9B
+TARGET_DIR=/work/vita/lanfeng/vlas/starVLA/playground/Pretrained_models/Qwen3.5-9B
 
 echo "Downloading Qwen/Qwen3.5-9B to ${TARGET_DIR} ..."
 huggingface-cli download Qwen/Qwen3.5-9B \

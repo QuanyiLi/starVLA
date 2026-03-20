@@ -30,7 +30,7 @@ export NCCL_TIMEOUT=3600
 ###############################################################################
 # Paths (adjust if needed)
 ###############################################################################
-STARVLA_ROOT=/work/vita/lanfeng/vlas/startVLA
+STARVLA_ROOT=/work/vita/lanfeng/vlas/starVLA
 CONFIG_YAML=${STARVLA_ROOT}/examples/wiser_panda/starvla_cotrain_wiser.yaml
 DEEPSPEED_CFG=${STARVLA_ROOT}/starVLA/config/deepseeds/deepspeed_zero2.yaml
 

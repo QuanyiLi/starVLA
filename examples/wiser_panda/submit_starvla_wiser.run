@@ -14,6 +14,8 @@ export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 export MASTER_PORT=29500
 export CC=gcc
 export WANDB_MODE=disabled
+export DS_BUILD_OPS=0
+export CUDA_HOME=$(python -c "import torch.utils.cpp_extension; print(torch.utils.cpp_extension.CUDA_HOME or '')" 2>/dev/null)
 
 STARVLA_ROOT=/work/vita/lanfeng/vlas/starVLA
 

@@ -328,6 +328,7 @@ def get_all_frames(
         for frame in container.decode(video=0):
             frame = frame.to_ndarray(format="rgb24")
             frames.append(frame)
+        container.close()
         frames = np.array(frames)
     elif video_backend == "torchvision_av":
         # set backend and reader

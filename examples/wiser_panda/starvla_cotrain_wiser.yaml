@@ -10,7 +10,7 @@ framework:
   name: QwenGR00T
   qwenvl:
     base_vlm: /work/vita/lanfeng/vlas/starVLA/playground/Pretrained_models/Qwen3.5-9B
-    attn_implementation: flash_attention_2
+    attn_implementation: sdpa
     vl_hidden_dim: 2048
   dino:
     dino_backbone: dinov2_vits14

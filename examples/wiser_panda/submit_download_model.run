@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=dl_qwen35
+#SBATCH --job-name=dl_qwen3
 #SBATCH --output=/home/lfeng/task_logs/%j.log
 #SBATCH --partition=h100
 #SBATCH --qos=vita
@@ -10,10 +10,10 @@
 #SBATCH --time=2:00:00
 #SBATCH --mem=32G
 
-TARGET_DIR=/work/vita/lanfeng/vlas/starVLA/playground/Pretrained_models/Qwen3.5-9B
+TARGET_DIR=/work/vita/lanfeng/vlas/starVLA/playground/Pretrained_models/Qwen3-VL-4B-Instruct
 
-echo "Downloading Qwen/Qwen3.5-9B to ${TARGET_DIR} ..."
-huggingface-cli download Qwen/Qwen3.5-9B \
+echo "Downloading Qwen/Qwen3-VL-4B-Instruct to ${TARGET_DIR} ..."
+huggingface-cli download Qwen/Qwen3-VL-4B-Instruct \
     --local-dir ${TARGET_DIR}
 
 echo "Download complete. Contents:"

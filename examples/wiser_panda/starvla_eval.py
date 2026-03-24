@@ -248,7 +248,7 @@ def run_eval(args):
     model = model.to(device).eval()
 
     # Retrieve action normalization statistics
-    action_norm_stats = baseframework.get_action_stats(model)
+    action_norm_stats = model.get_action_stats()
 
     # ------------------------------------------------------------------ #
     # Determine splits

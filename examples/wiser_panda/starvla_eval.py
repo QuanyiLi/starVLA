@@ -1,10 +1,8 @@
 """
 Evaluate a trained starVLA (Qwen-GR00T) model across 24 config subsets on train/test splits.
 
-Each GPU process evaluates a slice of subsets [start_subset, end_subset).
-Inside each episode the model produces a 20-step action chunk; actions are
-executed one-by-one until the chunk is exhausted, then a fresh inference is
-performed with the latest observation.
+Uses the official `rollout()` function from vla_align for env management,
+metrics collection, and optional video/data saving.
 
 Usage (single GPU, subsets 0-5, both splits):
 
@@ -23,13 +21,11 @@ import os
 import shutil
 import sys
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import torch
 from PIL import Image
-from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
 # Resolve starVLA root so that local imports work regardless of cwd
@@ -49,14 +45,13 @@ if str(_VLA_ROOT) not in sys.path:
 from vla_align.env.config import get_env_cfg, MAX_EPISODE_STEP_WORKSPACE_EVAL
 from vla_align.utils.env import build_endless_env
 from vla_align.utils.helpers import batch_tensor_to_string
+from vla_align.utils.rollout import rollout
 
 # ---------------------------------------------------------------------------
 # Observation keys (must match the ManiSkill env wrapper)
 # ---------------------------------------------------------------------------
 IMAGE_1_KEY = "observation.images.image_1"
 WRIST_IMAGE_KEY = "observation.images.wrist_image"
-IMAGE_1_ROBOT_STATE = "observation.images.image_1_robot_state"
-IMAGE_1_SEG_MASK = "observation.images.image_1_segmentation_mask"
 OBS_STATE_KEY = "observation.state"
 TASK_KEY = "task"
 
@@ -76,45 +71,6 @@ logger = logging.getLogger(__name__)
 #                          Helper Functions                                  #
 # ======================================================================== #
 
-def env_obs_to_model_inputs(obs, num_envs):
-    """
-    Convert a batched TensorDict observation from ManiSkill into a list of
-    dicts that ``model.predict_action`` expects.
-
-    Each element of the returned list corresponds to one parallel env and has:
-        image : list[PIL.Image]   – single-view (image_1)
-        lang  : str               – task instruction
-
-    NOTE: state is intentionally NOT passed to the model.
-    The training YAML does not set include_state, so the model was trained
-    with state=None.  Passing state here would prepend state_features to
-    the DiT sequence, changing the attention pattern the model never saw.
-
-    NOTE: Images are passed as PIL images at their original env resolution.
-    The model's predict_action() internally resizes them to the training
-    resolution (224x224) via resize_images().
-
-    NOTE: The QwenVL build_qwenvl_inputs() automatically wraps the task
-    instruction with the CoT prompt template from config, so we just pass
-    the raw task string here.
-    """
-    # --- images: (B, H, W, C) uint8 tensor → list[PIL.Image] ---
-    images_t = obs[IMAGE_1_KEY]  # (B, H, W, C) uint8 on GPU
-    images_np = images_t.cpu().numpy()
-
-    # --- task instruction (byte-encoded tensor) → list[str] ---
-    instructions = batch_tensor_to_string(obs[TASK_KEY])
-
-    examples = []
-    for i in range(num_envs):
-        pil_img = Image.fromarray(images_np[i])
-        examples.append({
-            "image": [pil_img],  # list of views; single view for wiser_panda
-            "lang": instructions[i],
-        })
-    return examples
-
-
 def unnormalize_actions_min_max(normalized_actions, action_norm_stats):
     """Unnormalize using min_max mode (matching WiserPandaDataConfig).
 
@@ -130,89 +86,113 @@ def unnormalize_actions_min_max(normalized_actions, action_norm_stats):
     return (normalized_actions + 1) / 2 * (action_high - action_low) + action_low
 
 
-def rollout_with_chunking(
-    envs,
-    model,
-    action_norm_stats,
-    max_steps,
-    num_envs,
-    action_chunk_size=ACTION_CHUNK_SIZE,
-):
+# ======================================================================== #
+#                     StarVLA Policy Wrapper                                 #
+# ======================================================================== #
+
+class StarVLAChunkedPolicy:
     """
-    Run one round of evaluation across ``num_envs`` parallel environments.
+    Wraps a starVLA model into the policy interface expected by
+    ``vla_align.utils.rollout.rollout``:
 
-    Inference is performed once to get a 20-step action chunk. Actions are
-    then executed **one at a time**. After all 20 are consumed, a new
-    observation is taken and another inference is performed. This continues
-    until ``max_steps`` environment steps have been taken.
+        action_to_take, expert_action, policy_info = policy(obs)
 
-    Returns:
-        eval_infos : dict  – the info dict from the final env step (contains
-                             episode metrics such as success, return, etc.)
+    Internally maintains per-env action queues. When a queue is empty,
+    a fresh batch inference is performed to get a 20-step action chunk.
+    One action is popped from the queue per call.
+
+    NOTE on inputs to the model:
+    - State is NOT passed (training YAML does not set include_state).
+    - CoT prompt wrapping is handled automatically inside build_qwenvl_inputs().
+    - Images are resized to 224×224 inside predict_action().
     """
-    obs, _ = envs.reset()
 
-    # Pre-allocate per-env action queues (list of remaining actions)
-    # Each element is an np.ndarray of shape (remaining, action_dim) or None
-    action_queues = [None] * num_envs
-    first_inference_done = False
+    def __init__(self, model, action_norm_stats, action_chunk_size=ACTION_CHUNK_SIZE):
+        self.model = model
+        self.action_norm_stats = action_norm_stats
+        self.action_chunk_size = action_chunk_size
+        self._action_queues = None  # lazily initialized
+        self._first_inference_done = False
 
-    for step_idx in range(max_steps):
-        # Check which envs need a fresh inference (queue empty or None)
-        needs_inference = [
-            i for i in range(num_envs)
-            if action_queues[i] is None or len(action_queues[i]) == 0
-        ]
+    def reset(self):
+        """Clear action queues (call before each new episode/round)."""
+        self._action_queues = None
+        self._first_inference_done = False
 
-        if needs_inference:
-            # Build model inputs only for envs that need new actions
-            # For simplicity we re-infer for ALL envs when any need it.
-            # This is fine because the model is batched and the extra compute
-            # is negligible compared to re-constructing partial batches.
-            with torch.no_grad():
-                examples = env_obs_to_model_inputs(obs, num_envs)
-                output = model.predict_action(examples=examples)
-                norm_actions = output["normalized_actions"]  # (B, chunk, action_dim)
+    def __call__(self, obs):
+        """
+        Args:
+            obs: TensorDict from ManiSkill env with batched observations.
 
-            # ---- DIAGNOSTIC: print ranges on first inference step ----
-            if not first_inference_done:
-                na = norm_actions
-                logger.info(f"[DIAG] norm_actions shape={na.shape}, "
-                            f"range=[{na.min():.4f}, {na.max():.4f}], "
-                            f"mean={na.mean():.4f}")
-                logger.info(f"[DIAG] norm_actions[0,0,:] = {na[0,0,:]}")
+        Returns:
+            (action_to_take, expert_action, policy_info)
+            action_to_take: (num_envs, action_dim) tensor to step the env
+            expert_action:  same as action_to_take (no separate expert here)
+            policy_info:    dict with timing / diagnostic info
+        """
+        num_envs = obs[IMAGE_1_KEY].shape[0]
+        device = obs[OBS_STATE_KEY].device
 
-            # Unnormalize per env and fill queues
-            for i in range(num_envs):
-                unnorm = unnormalize_actions_min_max(
-                    norm_actions[i].copy(), action_norm_stats
-                )  # (chunk, action_dim)
-                action_queues[i] = unnorm  # full chunk
+        # Lazy init queues
+        if self._action_queues is None:
+            self._action_queues = [None] * num_envs
 
-            # ---- DIAGNOSTIC: print unnormalized actions on first step ----
-            if not first_inference_done:
-                u0 = action_queues[0]
-                logger.info(f"[DIAG] unnorm_actions[0] shape={u0.shape}, "
-                            f"range=[{u0.min():.4f}, {u0.max():.4f}]")
-                logger.info(f"[DIAG] unnorm_actions[0,0,:] = {u0[0,:]}")
-                first_inference_done = True
-
-        # Pop the first action from each env queue
-        actions = []
-        for i in range(num_envs):
-            action = action_queues[i][0]
-            action_queues[i] = action_queues[i][1:]  # pop front
-            actions.append(action)
-
-        actions_tensor = torch.tensor(
-            np.stack(actions, axis=0),
-            dtype=torch.float32,
-            device=obs[OBS_STATE_KEY].device,
+        # Check if any env needs a fresh inference
+        needs_inference = any(
+            self._action_queues[i] is None or len(self._action_queues[i]) == 0
+            for i in range(num_envs)
         )
 
-        obs, rew, done, eval_infos = envs.step(actions_tensor)
+        policy_info = {}
+        if needs_inference:
+            t0 = time.perf_counter()
 
-    return eval_infos, obs
+            # Convert env obs → model input format
+            images_np = obs[IMAGE_1_KEY].cpu().numpy()  # (B, H, W, C) uint8
+            instructions = batch_tensor_to_string(obs[TASK_KEY])
+
+            examples = []
+            for i in range(num_envs):
+                examples.append({
+                    "image": [Image.fromarray(images_np[i])],
+                    "lang": instructions[i],
+                })
+
+            with torch.no_grad():
+                output = self.model.predict_action(examples=examples)
+                norm_actions = output["normalized_actions"]  # (B, chunk, action_dim)
+
+            # Diagnostic on first call
+            if not self._first_inference_done:
+                logger.info(f"[DIAG] norm_actions shape={norm_actions.shape}, "
+                            f"range=[{norm_actions.min():.4f}, {norm_actions.max():.4f}]")
+
+            # Unnormalize and fill queues
+            for i in range(num_envs):
+                unnorm = unnormalize_actions_min_max(
+                    norm_actions[i].copy(), self.action_norm_stats
+                )
+                self._action_queues[i] = unnorm
+
+            if not self._first_inference_done:
+                u0 = self._action_queues[0]
+                logger.info(f"[DIAG] unnorm_actions[0] shape={u0.shape}, "
+                            f"range=[{u0.min():.4f}, {u0.max():.4f}]")
+                self._first_inference_done = True
+
+            policy_info["inference_time"] = time.perf_counter() - t0
+
+        # Pop one action per env
+        actions = []
+        for i in range(num_envs):
+            actions.append(self._action_queues[i][0])
+            self._action_queues[i] = self._action_queues[i][1:]
+
+        actions_tensor = torch.tensor(
+            np.stack(actions, axis=0), dtype=torch.float32, device=device
+        )
+
+        return actions_tensor, actions_tensor, policy_info
 
 
 # ======================================================================== #
@@ -289,27 +269,23 @@ def run_eval(args):
     # ------------------------------------------------------------------ #
     # Retrieve action normalization statistics
     # ------------------------------------------------------------------ #
-    # The model already has norm_stats attached after from_pretrained().
-    # Structure: model.norm_stats[dataset_key]["action"] = {"min": [...], "max": [...], ...}
-    # For single-dataset training (wiser_panda), there's exactly one key.
     norm_stats = model.norm_stats
     unnorm_key = next(iter(norm_stats.keys()))
     action_norm_stats = norm_stats[unnorm_key]["action"]
 
-    # ---- DIAGNOSTIC: verify norm stats loaded correctly ----
     logger.info(f"unnorm_key = {unnorm_key}")
-    logger.info(f"action_norm_stats keys = {list(action_norm_stats.keys())}")
-    logger.info(f"action min  = {action_norm_stats.get('min', 'MISSING')}")
-    logger.info(f"action max  = {action_norm_stats.get('max', 'MISSING')}")
-    logger.info(f"action q01  = {action_norm_stats.get('q01', 'MISSING')}")
-    logger.info(f"action q99  = {action_norm_stats.get('q99', 'MISSING')}")
-    logger.info(f"action mask = {action_norm_stats.get('mask', 'MISSING')}")
+    logger.info(f"action min = {action_norm_stats.get('min', 'MISSING')}")
+    logger.info(f"action max = {action_norm_stats.get('max', 'MISSING')}")
 
-    # Validate that min/max keys exist (required for min_max unnormalization)
     assert "min" in action_norm_stats and "max" in action_norm_stats, (
         f"action_norm_stats must contain 'min' and 'max' keys for min_max "
         f"unnormalization, but got keys: {list(action_norm_stats.keys())}"
     )
+
+    # ------------------------------------------------------------------ #
+    # Build policy wrapper
+    # ------------------------------------------------------------------ #
+    policy = StarVLAChunkedPolicy(model, action_norm_stats)
 
     # ------------------------------------------------------------------ #
     # Determine splits
@@ -324,6 +300,7 @@ def run_eval(args):
     # Evaluation loop
     # ------------------------------------------------------------------ #
     num_envs = args.num_envs
+    save_video = args.save_video
 
     for split in splits:
         for cfg_idx in range(args.start_subset, args.end_subset):
@@ -353,87 +330,41 @@ def run_eval(args):
                 obs_mode="rgb+segmentation",
                 scene_cfg_to_overwrite=scene_cfg,
             )
-            envs = build_endless_env(env_cfg, record_video=False, data_record_dir="test")
-            max_steps = envs.unwrapped.max_episode_steps
+            envs = build_endless_env(
+                env_cfg,
+                record_video=save_video,
+                data_record_dir=subset_dir if save_video else None,
+            )
 
             print("\n" + "=" * 60)
             print(f"  Rollout: {cfg_name} ({split})  |  "
-                  f"{num_envs} envs × {args.eval_rounds} rounds × {max_steps} steps")
+                  f"{num_envs} envs × {args.eval_rounds} rounds")
             print("=" * 60)
 
-            # Collect metrics over multiple rounds
-            all_eval_infos = defaultdict(list)
-            episode_records = []
+            # Reset policy queues before each subset
+            policy.reset()
 
-            t0 = time.perf_counter()
-            for round_idx in range(args.eval_rounds):
-                eval_infos, last_obs = rollout_with_chunking(
-                    envs,
-                    model,
-                    action_norm_stats,
-                    max_steps=max_steps,
-                    num_envs=num_envs,
-                    action_chunk_size=ACTION_CHUNK_SIZE,
-                )
+            # Use the official rollout function
+            # indices_to_save=None → save all envs when demo_saving_dir is set
+            results = rollout(
+                envs,
+                policy,
+                round_to_collect=args.eval_rounds,
+                demo_saving_dir=subset_dir if save_video else None,
+                indices_to_save=None,
+            )
 
-                # Collect per-env episode records
-                task_names = batch_tensor_to_string(last_obs[TASK_KEY])
-
-                for env_idx in range(num_envs):
-                    ep_info = eval_infos["episode"]
-                    record = {
-                        "round": round_idx,
-                        "env_idx": env_idx,
-                        "global_episode_idx": round_idx * num_envs + env_idx,
-                        "task_prompt": task_names[env_idx],
-                        "success_once": bool(ep_info["success_once"][env_idx].item()),
-                        "success_at_end": bool(ep_info["success_at_end"][env_idx].item()),
-                        "return": float(ep_info["return"][env_idx].item()),
-                    }
-                    # Optional keys
-                    for extra_key in ["near_goal", "is_grasped", "tcp_near_goal"]:
-                        if extra_key in eval_infos:
-                            record[extra_key] = bool(eval_infos[extra_key][env_idx].item())
-                    episode_records.append(record)
-
-                # Accumulate summary metrics
-                for k in ["success_once", "success_at_end", "return"]:
-                    all_eval_infos[k].append(eval_infos["episode"][k])
-                for k in ["near_goal", "is_grasped", "tcp_near_goal"]:
-                    if k in eval_infos:
-                        all_eval_infos[k].append(eval_infos[k])
-
-            elapsed = time.perf_counter() - t0
-
-            # Compute summary statistics
-            summary = {}
-            for k, vals in all_eval_infos.items():
-                stacked = torch.cat(vals).float()
-                summary[f"{k}_mean"] = stacked.mean().cpu().item()
-
-            summary["rollout_time"] = round(elapsed, 2)
-            total_steps = num_envs * args.eval_rounds * max_steps
-            summary["rollout_fps"] = round(total_steps / elapsed, 2)
-
-            print(f"\n  Performance ({elapsed:.1f}s):")
-            for k, v in summary.items():
+            print(f"\n  Performance:")
+            for k, v in results.items():
                 print(f"    {k}: {v}")
 
-            # Save metrics
-            metrics_data = {
-                "summary": summary,
-                "episodes": episode_records,
-                "config": {
-                    "num_envs": num_envs,
-                    "rounds": args.eval_rounds,
-                    "max_steps_per_episode": max_steps,
-                    "total_episodes": len(episode_records),
-                    "action_chunk_size": ACTION_CHUNK_SIZE,
-                },
-            }
-            with open(metrics_file, "w") as f:
-                json.dump(metrics_data, f, indent=2)
-            logger.info(f"Metrics saved to {metrics_file}")
+            # Save metrics (rollout already saves episode_metrics.json
+            # in demo_saving_dir, but also save to subset_dir when
+            # not saving video)
+            if not save_video or not os.path.exists(metrics_file):
+                with open(metrics_file, "w") as f:
+                    json.dump({"summary": results}, f, indent=2)
+                logger.info(f"Metrics saved to {metrics_file}")
 
             envs.unwrapped.close()
 
@@ -463,6 +394,8 @@ def parse_args():
                     help="Number of parallel environments")
     p.add_argument("--aggregate_only", action="store_true",
                     help="Skip rollouts, only aggregate existing results")
+    p.add_argument("--save_video", action="store_true",
+                    help="Save rollout videos and data to each subset dir")
     return p.parse_args()
 
 

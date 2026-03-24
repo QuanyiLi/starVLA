@@ -19,14 +19,21 @@ STARVLA_ROOT=/work/vita/lanfeng/vlas/starVLA
 EVAL_SCRIPT="${STARVLA_ROOT}/examples/wiser_panda/starvla_eval.py"
 
 # --------------- paths (edit as needed) ---------------
-CHECKPOINT=/work/vita/lanfeng/vlas/exp_results/starVLA/starvla_wiser_panda/checkpoints/steps_15000_pytorch_model.pt
+CHECKPOINT=/work/vita/lanfeng/vlas/exp_results/starVLA/starvla_wiser_panda/checkpoints/steps_20000_pytorch_model.pt
 RESULT_DIR=/work/vita/lanfeng/vlas/starvla_eval_result
+SAVE_VIDEO=true  # set to true to save rollout videos
 # ------------------------------------------------------
 
 mkdir -p "${RESULT_DIR}"
 
 # Copy this script into result dir for reproducibility
 cp "$0" "${RESULT_DIR}/"
+
+# Build optional flags
+EXTRA_FLAGS=""
+if [ "${SAVE_VIDEO}" = "true" ]; then
+    EXTRA_FLAGS="--save_video"
+fi
 
 # Launch 4 processes, one per GPU, each handling 6 subsets
 for GPU_ID in 0 1 2 3; do
@@ -41,6 +48,7 @@ for GPU_ID in 0 1 2 3; do
         --split both \
         --eval_rounds 1 \
         --num_envs 12 \
+        ${EXTRA_FLAGS} \
         > "${RESULT_DIR}/gpu_${GPU_ID}.log" 2>&1 &
 
     echo "Launched GPU ${GPU_ID}: subsets ${START} to $((END - 1))"

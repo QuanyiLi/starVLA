@@ -167,12 +167,27 @@ def rollout_with_chunking(
                 output = model.predict_action(examples=examples)
                 norm_actions = output["normalized_actions"]  # (B, chunk, action_dim)
 
+            # ---- DIAGNOSTIC: print ranges on first inference step ----
+            if t == 0:
+                na = norm_actions
+                logger.info(f"[DIAG] norm_actions shape={na.shape}, "
+                            f"range=[{na.min():.4f}, {na.max():.4f}], "
+                            f"mean={na.mean():.4f}")
+                logger.info(f"[DIAG] norm_actions[0,0,:] = {na[0,0,:]}")
+
             # Unnormalize per env and fill queues
             for i in range(num_envs):
                 unnorm = unnormalize_wiser_actions(
                     norm_actions[i].copy(), action_norm_stats
                 )  # (chunk, action_dim)
                 action_queues[i] = unnorm  # full chunk
+
+            # ---- DIAGNOSTIC: print unnormalized actions on first step ----
+            if t == 0:
+                u0 = action_queues[0]
+                logger.info(f"[DIAG] unnorm_actions[0] shape={u0.shape}, "
+                            f"range=[{u0.min():.4f}, {u0.max():.4f}]")
+                logger.info(f"[DIAG] unnorm_actions[0,0,:] = {u0[0,:]}")
 
         # Pop the first action from each env queue
         actions = []
@@ -271,6 +286,15 @@ def run_eval(args):
     # Auto-resolve the dataset key when there's only one
     unnorm_key = next(iter(norm_stats.keys()))
     action_norm_stats = norm_stats[unnorm_key]["action"]
+
+    # ---- DIAGNOSTIC: verify norm stats loaded correctly ----
+    logger.info(f"unnorm_key = {unnorm_key}")
+    logger.info(f"action_norm_stats keys = {list(action_norm_stats.keys())}")
+    logger.info(f"action min  = {action_norm_stats.get('min', 'MISSING')}")
+    logger.info(f"action max  = {action_norm_stats.get('max', 'MISSING')}")
+    logger.info(f"action q01  = {action_norm_stats.get('q01', 'MISSING')}")
+    logger.info(f"action q99  = {action_norm_stats.get('q99', 'MISSING')}")
+    logger.info(f"action mask = {action_norm_stats.get('mask', 'MISSING')}")
 
     # ------------------------------------------------------------------ #
     # Determine splits

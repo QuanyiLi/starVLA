@@ -248,7 +248,13 @@ def run_eval(args):
     model = model.to(device).eval()
 
     # Retrieve action normalization statistics
-    action_norm_stats = model.get_action_stats()
+    # Load norm_stats directly from the checkpoint (same pattern as LIBERO/SimplerEnv evals)
+    # because get_action_stats is a @classmethod and cannot access instance attributes.
+    from starVLA.model.framework.share_tools import read_mode_config
+    _, norm_stats = read_mode_config(Path(args.checkpoint))
+    # Auto-resolve the dataset key when there's only one
+    unnorm_key = next(iter(norm_stats.keys()))
+    action_norm_stats = norm_stats[unnorm_key]["action"]
 
     # ------------------------------------------------------------------ #
     # Determine splits

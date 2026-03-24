@@ -1,0 +1,58 @@
+#!/bin/bash
+#SBATCH --job-name=starvla_resume_verify
+#SBATCH --output=/home/lfeng/task_logs/%j.log
+#SBATCH --partition=l40s
+#SBATCH --qos=vita
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --gpus-per-node=1
+#SBATCH --nodes=1
+#SBATCH --time=1:00:00
+#SBATCH --mem=50G
+
+# ============================================================
+# Resume training from step 20000 checkpoint on 1 node (4 GPUs)
+# to verify the loss scale after resume.
+# If loss starts at ~0.006 → checkpoint loads correctly during
+#   training, but accelerator.get_state_dict() saves it wrong.
+# If loss starts at ~1.6 → checkpoint file itself is corrupted.
+# ============================================================
+
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+export MASTER_PORT=29500
+export CC=gcc
+export WANDB_MODE=disabled
+export DS_BUILD_OPS=0
+export CUDA_HOME=$(python -c "import torch.utils.cpp_extension; print(torch.utils.cpp_extension.CUDA_HOME or '')" 2>/dev/null)
+
+STARVLA_ROOT=/work/vita/lanfeng/vlas/starVLA
+
+srun torchrun \
+    --nnodes=1 \
+    --nproc_per_node=4 \
+    --rdzv_id=$SLURM_JOB_ID \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+    ${STARVLA_ROOT}/starVLA/training/train_starvla.py \
+    --config_yaml ${STARVLA_ROOT}/examples/wiser_panda/starvla_cotrain_wiser.yaml \
+    --framework.name QwenGR00T \
+    --framework.qwenvl.base_vlm ${STARVLA_ROOT}/playground/Pretrained_models/Qwen3-VL-4B-Instruct \
+    --framework.action_model.action_model_type "DiT-B" \
+    --datasets.vla_data.data_root_dir /work/vita/lanfeng/vlas/vla/wiser_dataset \
+    --datasets.vla_data.data_mix wiser_panda \
+    --datasets.vla_data.per_device_batch_size 16 \
+    --datasets.vla_data.lerobot_version "v3.0" \
+    --datasets.vla_data.video_backend pyav \
+    --trainer.freeze_modules '' \
+    --trainer.is_resume true \
+    --trainer.max_train_steps 20100 \
+    --trainer.save_interval 50000 \
+    --trainer.logging_frequency 1 \
+    --trainer.eval_interval 100 \
+    --trainer.learning_rate.base 3e-5 \
+    --run_root_dir /work/vita/lanfeng/vlas/exp_results/starVLA \
+    --run_id starvla_wiser_panda \
+    --wandb_project starvla_wiser \
+    --wandb_entity your_wandb_entity
+
+echo "Resume verify done."

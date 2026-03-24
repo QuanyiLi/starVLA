@@ -45,8 +45,8 @@ srun torchrun \
     --datasets.vla_data.video_backend pyav \
     --trainer.freeze_modules '' \
     --trainer.is_resume true \
-    --trainer.max_train_steps 20100 \
-    --trainer.save_interval 50000 \
+    --trainer.max_train_steps 24000 \
+    --trainer.save_interval 2000 \
     --trainer.logging_frequency 1 \
     --trainer.eval_interval 100 \
     --trainer.learning_rate.base 3e-5 \

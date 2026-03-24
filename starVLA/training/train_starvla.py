@@ -206,11 +206,13 @@ class VLATrainer(TrainerUtils):
 
     def _save_checkpoint(self):
         """Save current training state."""
+        # get_state_dict is a collective op — ALL ranks must call it together
+        state_dict = self.accelerator.get_state_dict(self.model)
+
         if self.accelerator.is_main_process:
             save_format = getattr(self.config.trainer, "save_format", "pt")
             checkpoint_path = os.path.join(self.checkpoint_dir, f"steps_{self.completed_steps}")
 
-            state_dict = self.accelerator.get_state_dict(self.model)
             if save_format == "safetensors":
                 from safetensors.torch import save_file
 
@@ -353,11 +355,13 @@ class VLATrainer(TrainerUtils):
 
     def _finalize_training(self):
         """Training end processing."""
+        # get_state_dict is a collective op — ALL ranks must call it together
+        state_dict = self.accelerator.get_state_dict(self.model)
+
         if self.accelerator.is_main_process:
             save_format = getattr(self.config.trainer, "save_format", "pt")
             final_checkpoint = os.path.join(self.config.output_dir, "final_model")
             os.makedirs(final_checkpoint, exist_ok=True)
-            state_dict = self.accelerator.get_state_dict(self.model)
             if save_format == "safetensors":
                 from safetensors.torch import save_file
 

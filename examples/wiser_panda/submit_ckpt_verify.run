@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name=ckpt_verify
+#SBATCH --output=/home/lfeng/task_logs/%j.log
+#SBATCH --partition=h100
+#SBATCH --qos=vita
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gpus-per-node=1
+#SBATCH --nodes=1
+#SBATCH --time=1:00:00
+#SBATCH --mem=80G
+
+# ============================================================
+# Verify checkpoint integrity by reproducing training forward pass.
+# Loads model via from_pretrained (same as eval script) then runs
+# model.forward() on training data (same as training script).
+# If loss matches training logs => checkpoint is fine, eval pipeline is broken.
+# If loss is wrong => checkpoint or from_pretrained loading is broken.
+# ============================================================
+
+STARVLA_ROOT=/work/vita/lanfeng/vlas/starVLA
+VERIFY_SCRIPT="${STARVLA_ROOT}/examples/wiser_panda/verify_ckpt_training_loss.py"
+
+# --------------- paths (edit as needed) ---------------
+CHECKPOINT=/work/vita/lanfeng/vlas/exp_results/starVLA/starvla_wiser_panda/checkpoints/steps_20000_pytorch_model.pt
+OUTPUT_DIR=/work/vita/lanfeng/vlas/ckpt_verify_debug
+# ------------------------------------------------------
+
+mkdir -p "${OUTPUT_DIR}"
+cp "$0" "${OUTPUT_DIR}/"
+
+CUDA_VISIBLE_DEVICES=0 python "${VERIFY_SCRIPT}" \
+    --checkpoint "${CHECKPOINT}" \
+    --output_dir "${OUTPUT_DIR}" \
+    --num_samples 10 \
+    --batch_size 1
+
+echo "Done. Results in ${OUTPUT_DIR}"

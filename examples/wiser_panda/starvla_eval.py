@@ -94,8 +94,10 @@ def env_obs_to_model_inputs(obs, num_envs):
     # --- task instruction (byte-encoded tensor) → list[str] ---
     instructions = batch_tensor_to_string(obs[TASK_KEY])
 
-    # --- state: (B, state_dim) → np.ndarray ---
-    state_np = obs[OBS_STATE_KEY].cpu().numpy()  # (B, state_dim)
+    # NOTE: state is intentionally NOT passed to the model.
+    # The training YAML does not set include_state, so the model was trained
+    # with state=None.  Passing state here would prepend state_features to
+    # the DiT sequence, changing the attention pattern the model never saw.
 
     examples = []
     for i in range(num_envs):
@@ -103,7 +105,6 @@ def env_obs_to_model_inputs(obs, num_envs):
         examples.append({
             "image": [pil_img],  # list of views; single view for wiser_panda
             "lang": instructions[i],
-            "state": state_np[i:i+1],  # (1, state_dim)
         })
     return examples
 

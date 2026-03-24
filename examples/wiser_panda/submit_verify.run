@@ -1,0 +1,35 @@
+#!/bin/bash
+#SBATCH --job-name=starvla_verify
+#SBATCH --output=/home/lfeng/task_logs/%j.log
+#SBATCH --partition=h100
+#SBATCH --qos=vita
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gpus-per-node=1
+#SBATCH --nodes=1
+#SBATCH --time=1:00:00
+#SBATCH --mem=80G
+
+# ============================================================
+# Verify trained starVLA model by forwarding one training sample.
+# Uses 1 GPU to load the model (same as eval) and the training
+# dataset (same as training), then logs loss + input diagnostics.
+# ============================================================
+
+STARVLA_ROOT=/work/vita/lanfeng/vlas/starVLA
+VERIFY_SCRIPT="${STARVLA_ROOT}/examples/wiser_panda/verify_model_training_data.py"
+
+# --------------- paths (edit as needed) ---------------
+CHECKPOINT=/work/vita/lanfeng/vlas/exp_results/starVLA/starvla_wiser_panda/checkpoints/steps_20000_pytorch_model.pt
+OUTPUT_DIR=/work/vita/lanfeng/vlas/starvla_verify_debug
+# ------------------------------------------------------
+
+mkdir -p "${OUTPUT_DIR}"
+cp "$0" "${OUTPUT_DIR}/"
+
+CUDA_VISIBLE_DEVICES=0 python "${VERIFY_SCRIPT}" \
+    --checkpoint "${CHECKPOINT}" \
+    --output_dir "${OUTPUT_DIR}" \
+    --sample_index 0
+
+echo "Done. Results in ${OUTPUT_DIR}"

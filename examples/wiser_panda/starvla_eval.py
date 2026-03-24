@@ -173,7 +173,7 @@ def rollout_with_chunking(
 
         obs, rew, done, eval_infos = envs.step(actions_tensor)
 
-    return eval_infos
+    return eval_infos, obs
 
 
 # ======================================================================== #
@@ -312,7 +312,7 @@ def run_eval(args):
 
             t0 = time.perf_counter()
             for round_idx in range(args.eval_rounds):
-                eval_infos = rollout_with_chunking(
+                eval_infos, last_obs = rollout_with_chunking(
                     envs,
                     model,
                     action_norm_stats,
@@ -322,8 +322,7 @@ def run_eval(args):
                 )
 
                 # Collect per-env episode records
-                task_bytes = envs.mani_skill_env.base_env.get_obs()[TASK_KEY]
-                task_names = batch_tensor_to_string(task_bytes)
+                task_names = batch_tensor_to_string(last_obs[TASK_KEY])
 
                 for env_idx in range(num_envs):
                     ep_info = eval_infos["episode"]

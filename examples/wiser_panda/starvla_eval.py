@@ -143,7 +143,7 @@ class StarVLAChunkedPolicy:
             for i in range(num_envs)
         )
 
-        policy_info = {}
+        policy_info = {"inference_time": 0.0}
         if needs_inference:
             t0 = time.perf_counter()
 

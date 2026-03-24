@@ -108,6 +108,21 @@ def env_obs_to_model_inputs(obs, num_envs):
     return examples
 
 
+def unnormalize_wiser_actions(normalized_actions, action_norm_stats):
+    """Unnormalize using min_max mode (matching WiserPandaDataConfig).
+
+    Training normalizes via: 2 * (x - min) / (max - min) - 1
+    Inverse:                 (x + 1) / 2 * (max - min) + min
+
+    No binary gripper binarization — wiser_panda normalizes all 8 dims
+    (7 joints + 1 gripper) uniformly with min_max.
+    """
+    action_high = np.array(action_norm_stats["max"])
+    action_low = np.array(action_norm_stats["min"])
+    normalized_actions = np.clip(normalized_actions, -1, 1)
+    return (normalized_actions + 1) / 2 * (action_high - action_low) + action_low
+
+
 def rollout_with_chunking(
     envs,
     model,
@@ -153,7 +168,7 @@ def rollout_with_chunking(
 
             # Unnormalize per env and fill queues
             for i in range(num_envs):
-                unnorm = baseframework.unnormalize_actions(
+                unnorm = unnormalize_wiser_actions(
                     norm_actions[i].copy(), action_norm_stats
                 )  # (chunk, action_dim)
                 action_queues[i] = unnorm  # full chunk

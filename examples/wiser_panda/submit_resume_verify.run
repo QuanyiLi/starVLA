@@ -5,10 +5,10 @@
 #SBATCH --qos=vita
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gpus-per-node=1
+#SBATCH --gpus-per-node=4
 #SBATCH --nodes=1
 #SBATCH --time=1:00:00
-#SBATCH --mem=50G
+#SBATCH --mem=80G
 
 # ============================================================
 # Resume training from step 20000 checkpoint on 1 node (4 GPUs)
@@ -40,7 +40,7 @@ srun torchrun \
     --framework.action_model.action_model_type "DiT-B" \
     --datasets.vla_data.data_root_dir /work/vita/lanfeng/vlas/vla/wiser_dataset \
     --datasets.vla_data.data_mix wiser_panda \
-    --datasets.vla_data.per_device_batch_size 16 \
+    --datasets.vla_data.per_device_batch_size 1 \
     --datasets.vla_data.lerobot_version "v3.0" \
     --datasets.vla_data.video_backend pyav \
     --trainer.freeze_modules '' \

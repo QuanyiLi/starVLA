@@ -10,7 +10,6 @@ Usage (single GPU, subsets 0-5, both splits):
 
     CUDA_VISIBLE_DEVICES=0 python starvla_eval.py \
         --checkpoint /path/to/steps_XXXXX_pytorch_model.pt \
-        --dataset_root /path/to/wiser_dataset \
         --result_dir /path/to/starvla_eval_result \
         --start_subset 0 --end_subset 6 --split both \
         --eval_rounds 1
@@ -85,7 +84,19 @@ def env_obs_to_model_inputs(obs, num_envs):
     Each element of the returned list corresponds to one parallel env and has:
         image : list[PIL.Image]   – single-view (image_1)
         lang  : str               – task instruction
-        state : np.ndarray (1, state_dim) – current joint state
+
+    NOTE: state is intentionally NOT passed to the model.
+    The training YAML does not set include_state, so the model was trained
+    with state=None.  Passing state here would prepend state_features to
+    the DiT sequence, changing the attention pattern the model never saw.
+
+    NOTE: Images are passed as PIL images at their original env resolution.
+    The model's predict_action() internally resizes them to the training
+    resolution (224x224) via resize_images().
+
+    NOTE: The QwenVL build_qwenvl_inputs() automatically wraps the task
+    instruction with the CoT prompt template from config, so we just pass
+    the raw task string here.
     """
     # --- images: (B, H, W, C) uint8 tensor → list[PIL.Image] ---
     images_t = obs[IMAGE_1_KEY]  # (B, H, W, C) uint8 on GPU
@@ -93,11 +104,6 @@ def env_obs_to_model_inputs(obs, num_envs):
 
     # --- task instruction (byte-encoded tensor) → list[str] ---
     instructions = batch_tensor_to_string(obs[TASK_KEY])
-
-    # NOTE: state is intentionally NOT passed to the model.
-    # The training YAML does not set include_state, so the model was trained
-    # with state=None.  Passing state here would prepend state_features to
-    # the DiT sequence, changing the attention pattern the model never saw.
 
     examples = []
     for i in range(num_envs):
@@ -109,14 +115,14 @@ def env_obs_to_model_inputs(obs, num_envs):
     return examples
 
 
-def unnormalize_wiser_actions(normalized_actions, action_norm_stats):
+def unnormalize_actions_min_max(normalized_actions, action_norm_stats):
     """Unnormalize using min_max mode (matching WiserPandaDataConfig).
 
     Training normalizes via: 2 * (x - min) / (max - min) - 1
     Inverse:                 (x + 1) / 2 * (max - min) + min
 
-    No binary gripper binarization — wiser_panda normalizes all 8 dims
-    (7 joints + 1 gripper) uniformly with min_max.
+    WiserPandaDataConfig uses min_max for ALL 8 dims (7 joints + 1 gripper)
+    uniformly — no binary gripper binarization, no q99 mode.
     """
     action_high = np.array(action_norm_stats["max"])
     action_low = np.array(action_norm_stats["min"])
@@ -149,6 +155,7 @@ def rollout_with_chunking(
     # Pre-allocate per-env action queues (list of remaining actions)
     # Each element is an np.ndarray of shape (remaining, action_dim) or None
     action_queues = [None] * num_envs
+    first_inference_done = False
 
     for step_idx in range(max_steps):
         # Check which envs need a fresh inference (queue empty or None)
@@ -168,7 +175,7 @@ def rollout_with_chunking(
                 norm_actions = output["normalized_actions"]  # (B, chunk, action_dim)
 
             # ---- DIAGNOSTIC: print ranges on first inference step ----
-            if t == 0:
+            if not first_inference_done:
                 na = norm_actions
                 logger.info(f"[DIAG] norm_actions shape={na.shape}, "
                             f"range=[{na.min():.4f}, {na.max():.4f}], "
@@ -177,17 +184,18 @@ def rollout_with_chunking(
 
             # Unnormalize per env and fill queues
             for i in range(num_envs):
-                unnorm = unnormalize_wiser_actions(
+                unnorm = unnormalize_actions_min_max(
                     norm_actions[i].copy(), action_norm_stats
                 )  # (chunk, action_dim)
                 action_queues[i] = unnorm  # full chunk
 
             # ---- DIAGNOSTIC: print unnormalized actions on first step ----
-            if t == 0:
+            if not first_inference_done:
                 u0 = action_queues[0]
                 logger.info(f"[DIAG] unnorm_actions[0] shape={u0.shape}, "
                             f"range=[{u0.min():.4f}, {u0.max():.4f}]")
                 logger.info(f"[DIAG] unnorm_actions[0,0,:] = {u0[0,:]}")
+                first_inference_done = True
 
         # Pop the first action from each env queue
         actions = []
@@ -278,12 +286,13 @@ def run_eval(args):
     model = baseframework.from_pretrained(args.checkpoint)
     model = model.to(device).eval()
 
+    # ------------------------------------------------------------------ #
     # Retrieve action normalization statistics
-    # Load norm_stats directly from the checkpoint (same pattern as LIBERO/SimplerEnv evals)
-    # because get_action_stats is a @classmethod and cannot access instance attributes.
-    from starVLA.model.framework.share_tools import read_mode_config
-    _, norm_stats = read_mode_config(Path(args.checkpoint))
-    # Auto-resolve the dataset key when there's only one
+    # ------------------------------------------------------------------ #
+    # The model already has norm_stats attached after from_pretrained().
+    # Structure: model.norm_stats[dataset_key]["action"] = {"min": [...], "max": [...], ...}
+    # For single-dataset training (wiser_panda), there's exactly one key.
+    norm_stats = model.norm_stats
     unnorm_key = next(iter(norm_stats.keys()))
     action_norm_stats = norm_stats[unnorm_key]["action"]
 
@@ -295,6 +304,12 @@ def run_eval(args):
     logger.info(f"action q01  = {action_norm_stats.get('q01', 'MISSING')}")
     logger.info(f"action q99  = {action_norm_stats.get('q99', 'MISSING')}")
     logger.info(f"action mask = {action_norm_stats.get('mask', 'MISSING')}")
+
+    # Validate that min/max keys exist (required for min_max unnormalization)
+    assert "min" in action_norm_stats and "max" in action_norm_stats, (
+        f"action_norm_stats must contain 'min' and 'max' keys for min_max "
+        f"unnormalization, but got keys: {list(action_norm_stats.keys())}"
+    )
 
     # ------------------------------------------------------------------ #
     # Determine splits
@@ -433,9 +448,6 @@ def parse_args():
     p = argparse.ArgumentParser(description="StarVLA distributed evaluation")
     p.add_argument("--checkpoint", type=str, required=True,
                     help="Path to starVLA .pt or .safetensors checkpoint")
-    p.add_argument("--dataset_root", type=str, default=None,
-                    help="Root of the wiser dataset (unused at runtime, "
-                         "kept for compatibility)")
     p.add_argument("--result_dir", type=str, default="./starvla_eval_result",
                     help="Directory to store per-subset results")
     p.add_argument("--start_subset", type=int, default=0,

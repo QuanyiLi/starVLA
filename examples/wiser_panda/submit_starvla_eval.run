@@ -20,7 +20,6 @@ EVAL_SCRIPT="${STARVLA_ROOT}/examples/wiser_panda/starvla_eval.py"
 
 # --------------- paths (edit as needed) ---------------
 CHECKPOINT=/work/vita/lanfeng/vlas/exp_results/starVLA/starvla_wiser_panda/checkpoints/steps_15000_pytorch_model.pt
-DATASET_ROOT=/work/vita/lanfeng/vlas/vla/wiser_dataset
 RESULT_DIR=/work/vita/lanfeng/vlas/starvla_eval_result
 # ------------------------------------------------------
 
@@ -36,7 +35,6 @@ for GPU_ID in 0 1 2 3; do
 
     CUDA_VISIBLE_DEVICES=$GPU_ID python "${EVAL_SCRIPT}" \
         --checkpoint "${CHECKPOINT}" \
-        --dataset_root "${DATASET_ROOT}" \
         --result_dir "${RESULT_DIR}" \
         --start_subset ${START} \
         --end_subset ${END} \

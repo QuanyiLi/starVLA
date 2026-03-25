@@ -185,6 +185,33 @@ def main():
 
     batch = [sample]  # batch of 1
 
+    # Log exact input format going into model.forward()
+    logger.info("-" * 40)
+    logger.info("Exact examples[0] fed to model.forward():")
+    for key, val in sample.items():
+        if isinstance(val, np.ndarray):
+            logger.info(f"  {key}: np.ndarray  dtype={val.dtype}  shape={val.shape}  "
+                        f"range=[{val.min():.6f}, {val.max():.6f}]")
+        elif isinstance(val, torch.Tensor):
+            logger.info(f"  {key}: torch.Tensor  dtype={val.dtype}  shape={tuple(val.shape)}  "
+                        f"range=[{val.min():.6f}, {val.max():.6f}]")
+        elif isinstance(val, list):
+            logger.info(f"  {key}: list  len={len(val)}")
+            for j, item in enumerate(val):
+                if isinstance(item, Image.Image):
+                    arr = np.array(item)
+                    logger.info(f"    [{j}]: PIL.Image  size={item.size}  mode={item.mode}  "
+                                f"array_dtype={arr.dtype}  array_shape={arr.shape}")
+                elif isinstance(item, np.ndarray):
+                    logger.info(f"    [{j}]: np.ndarray  dtype={item.dtype}  shape={item.shape}")
+                else:
+                    logger.info(f"    [{j}]: {type(item).__name__}  val={str(item)[:100]}")
+        elif isinstance(val, str):
+            logger.info(f"  {key}: str  val='{val[:100]}'")
+        else:
+            logger.info(f"  {key}: {type(val).__name__}  val={str(val)[:100]}")
+    logger.info("-" * 40)
+
     try:
         with torch.no_grad():
             with torch.autocast("cuda", dtype=torch.bfloat16):

@@ -86,6 +86,27 @@ def unnormalize_actions_min_max(normalized_actions, action_norm_stats):
     return (normalized_actions + 1) / 2 * (action_high - action_low) + action_low
 
 
+def normalize_state_min_max(raw_state, state_norm_stats):
+    """Normalize raw state using min_max mode (matching WiserPandaDataConfig).
+
+    Formula: 2 * (x - min) / (max - min) - 1  →  maps to [-1, 1]
+
+    Args:
+        raw_state: np.ndarray of shape (state_dim,) — raw env state.
+        state_norm_stats: dict with 'min' and 'max' lists.
+    Returns:
+        np.ndarray of same shape, normalized to [-1, 1].
+    """
+    s_min = np.array(state_norm_stats["min"])
+    s_max = np.array(state_norm_stats["max"])
+    denom = s_max - s_min
+    # Avoid division by zero where min == max (set to 0 as training does)
+    mask = denom != 0
+    normalized = np.zeros_like(raw_state, dtype=np.float32)
+    normalized[..., mask] = 2.0 * (raw_state[..., mask] - s_min[mask]) / denom[mask] - 1.0
+    return np.clip(normalized, -1, 1)
+
+
 # ======================================================================== #
 #                     StarVLA Policy Wrapper                                 #
 # ======================================================================== #
@@ -101,15 +122,17 @@ class StarVLAChunkedPolicy:
     a fresh batch inference is performed to get a 20-step action chunk.
     One action is popped from the queue per call.
 
-    NOTE on inputs to the model:
-    - State is NOT passed (training YAML does not set include_state).
+    Inputs to the model:
+    - 2 images (main camera + wrist camera), resized to 224×224 inside predict_action().
+    - State (9-dim q_pos), normalized with min_max before passing to model.
     - CoT prompt wrapping is handled automatically inside build_qwenvl_inputs().
-    - Images are resized to 224×224 inside predict_action().
     """
 
-    def __init__(self, model, action_norm_stats, action_chunk_size=ACTION_CHUNK_SIZE):
+    def __init__(self, model, action_norm_stats, state_norm_stats,
+                 action_chunk_size=ACTION_CHUNK_SIZE):
         self.model = model
         self.action_norm_stats = action_norm_stats
+        self.state_norm_stats = state_norm_stats
         self.action_chunk_size = action_chunk_size
         self._action_queues = None  # lazily initialized
         self._first_inference_done = False
@@ -150,16 +173,22 @@ class StarVLAChunkedPolicy:
             # Convert env obs → model input format
             images_np = obs[IMAGE_1_KEY].cpu().numpy()  # (B, H, W, C) uint8
             wrist_np = obs[WRIST_IMAGE_KEY].cpu().numpy()  # (B, H, W, C) uint8
+            state_np = obs[OBS_STATE_KEY].cpu().numpy()    # (B, state_dim) float
             instructions = batch_tensor_to_string(obs[TASK_KEY])
 
             examples = []
             for i in range(num_envs):
+                # Normalize state with min_max (same as training)
+                norm_state = normalize_state_min_max(
+                    state_np[i], self.state_norm_stats
+                )
                 examples.append({
                     "image": [
                         Image.fromarray(images_np[i]),   # main camera
                         Image.fromarray(wrist_np[i]),    # wrist camera
                     ],
                     "lang": instructions[i],
+                    "state": norm_state[np.newaxis, :].astype(np.float16),  # (1, state_dim)
                 })
 
             with torch.no_grad():
@@ -276,20 +305,27 @@ def run_eval(args):
     norm_stats = model.norm_stats
     unnorm_key = next(iter(norm_stats.keys()))
     action_norm_stats = norm_stats[unnorm_key]["action"]
+    state_norm_stats = norm_stats[unnorm_key]["state"]
 
     logger.info(f"unnorm_key = {unnorm_key}")
     logger.info(f"action min = {action_norm_stats.get('min', 'MISSING')}")
     logger.info(f"action max = {action_norm_stats.get('max', 'MISSING')}")
+    logger.info(f"state min  = {state_norm_stats.get('min', 'MISSING')}")
+    logger.info(f"state max  = {state_norm_stats.get('max', 'MISSING')}")
 
     assert "min" in action_norm_stats and "max" in action_norm_stats, (
         f"action_norm_stats must contain 'min' and 'max' keys for min_max "
         f"unnormalization, but got keys: {list(action_norm_stats.keys())}"
     )
+    assert "min" in state_norm_stats and "max" in state_norm_stats, (
+        f"state_norm_stats must contain 'min' and 'max' keys for min_max "
+        f"normalization, but got keys: {list(state_norm_stats.keys())}"
+    )
 
     # ------------------------------------------------------------------ #
     # Build policy wrapper
     # ------------------------------------------------------------------ #
-    policy = StarVLAChunkedPolicy(model, action_norm_stats)
+    policy = StarVLAChunkedPolicy(model, action_norm_stats, state_norm_stats)
 
     # ------------------------------------------------------------------ #
     # Determine splits

@@ -21,7 +21,7 @@ EVAL_SCRIPT="${STARVLA_ROOT}/examples/wiser_panda/starvla_eval.py"
 # --------------- paths (edit as needed) ---------------
 CHECKPOINT=/work/vita/lanfeng/vlas/exp_results/starVLA/starvla_wiser_panda/checkpoints/steps_20000_pytorch_model.pt
 RESULT_DIR=/work/vita/lanfeng/vlas/starvla_eval_result
-SAVE_VIDEO=true  # set to true to save rollout videos
+SAVE_VIDEO=false  # set to true to save rollout videos
 # ------------------------------------------------------
 
 mkdir -p "${RESULT_DIR}"

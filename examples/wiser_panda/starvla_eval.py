@@ -170,6 +170,8 @@ class StarVLAChunkedPolicy:
             if not self._first_inference_done:
                 logger.info(f"[DIAG] norm_actions shape={norm_actions.shape}, "
                             f"range=[{norm_actions.min():.4f}, {norm_actions.max():.4f}]")
+                for env_i, inst in enumerate(instructions):
+                    logger.info(f"[DIAG] env {env_i} lang: '{inst}'")
 
             # Unnormalize and fill queues
             for i in range(num_envs):

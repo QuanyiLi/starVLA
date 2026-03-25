@@ -182,11 +182,11 @@ class StarVLAChunkedPolicy:
                 norm_state = normalize_state_min_max(
                     state_np[i], self.state_norm_stats
                 )
+                # Resize images to 224x224 (same as training _pack_sample)
+                main_img = Image.fromarray(images_np[i]).resize((224, 224))
+                wrist_img = Image.fromarray(wrist_np[i]).resize((224, 224))
                 examples.append({
-                    "image": [
-                        Image.fromarray(images_np[i]),   # main camera
-                        Image.fromarray(wrist_np[i]),    # wrist camera
-                    ],
+                    "image": [main_img, wrist_img],
                     "lang": instructions[i],
                     "state": norm_state[np.newaxis, :].astype(np.float16),  # (1, state_dim)
                 })

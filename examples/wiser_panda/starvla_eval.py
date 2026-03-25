@@ -149,12 +149,16 @@ class StarVLAChunkedPolicy:
 
             # Convert env obs → model input format
             images_np = obs[IMAGE_1_KEY].cpu().numpy()  # (B, H, W, C) uint8
+            wrist_np = obs[WRIST_IMAGE_KEY].cpu().numpy()  # (B, H, W, C) uint8
             instructions = batch_tensor_to_string(obs[TASK_KEY])
 
             examples = []
             for i in range(num_envs):
                 examples.append({
-                    "image": [Image.fromarray(images_np[i])],
+                    "image": [
+                        Image.fromarray(images_np[i]),   # main camera
+                        Image.fromarray(wrist_np[i]),    # wrist camera
+                    ],
                     "lang": instructions[i],
                 })
 

@@ -301,6 +301,12 @@ def run_eval(args):
     model = baseframework.from_pretrained(args.checkpoint)
     model = model.to(device).eval()
 
+    # Override denoising steps if specified
+    if args.denoise_timesteps is not None:
+        logger.info(f"Overriding num_inference_timesteps: "
+                    f"{model.action_model.num_inference_timesteps} -> {args.denoise_timesteps}")
+        model.action_model.num_inference_timesteps = args.denoise_timesteps
+
     # ------------------------------------------------------------------ #
     # Retrieve action normalization statistics
     # ------------------------------------------------------------------ #
@@ -438,6 +444,9 @@ def parse_args():
                     help="Skip rollouts, only aggregate existing results")
     p.add_argument("--save_video", action="store_true",
                     help="Save rollout videos and data to each subset dir")
+    p.add_argument("--denoise_timesteps", type=int, default=None,
+                    help="Override num_inference_timesteps for flow-matching denoising "
+                         "(default: use checkpoint value)")
     return p.parse_args()
 
 

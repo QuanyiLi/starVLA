@@ -22,6 +22,7 @@ EVAL_SCRIPT="${STARVLA_ROOT}/examples/wiser_panda/starvla_eval.py"
 CHECKPOINT=/work/vita/lanfeng/vlas/exp_results/starVLA/starvla_wiser_panda/checkpoints/steps_20000_pytorch_model.pt
 RESULT_DIR=/work/vita/lanfeng/vlas/starvla_eval_result
 SAVE_VIDEO=false  # set to true to save rollout videos
+DENOISE_TIMESTEPS=20  # flow-matching denoising steps (checkpoint default: 4)
 # ------------------------------------------------------
 
 mkdir -p "${RESULT_DIR}"
@@ -32,7 +33,10 @@ cp "$0" "${RESULT_DIR}/"
 # Build optional flags
 EXTRA_FLAGS=""
 if [ "${SAVE_VIDEO}" = "true" ]; then
-    EXTRA_FLAGS="--save_video"
+    EXTRA_FLAGS="${EXTRA_FLAGS} --save_video"
+fi
+if [ -n "${DENOISE_TIMESTEPS}" ]; then
+    EXTRA_FLAGS="${EXTRA_FLAGS} --denoise_timesteps ${DENOISE_TIMESTEPS}"
 fi
 
 # Launch 4 processes, one per GPU, each handling 6 subsets

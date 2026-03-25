@@ -31,7 +31,7 @@ framework:
     noise_beta_beta: 1.0
     noise_s: 0.999
     num_timestep_buckets: 1000
-    num_inference_timesteps: 4
+    num_inference_timesteps: 20
     num_target_vision_tokens: 32
     diffusion_model_cfg:
       cross_attention_dim: 2048

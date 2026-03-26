@@ -32,6 +32,10 @@ _STARVLA_ROOT = Path(__file__).resolve().parents[2]  # .../starVLA
 if str(_STARVLA_ROOT) not in sys.path:
     sys.path.insert(0, str(_STARVLA_ROOT))
 
+_VLA_ROOT = Path(__file__).resolve().parents[3] / "vla"  # .../vla
+if str(_VLA_ROOT) not in sys.path:
+    sys.path.insert(0, str(_VLA_ROOT))
+
 from omegaconf import OmegaConf
 
 from starVLA.model.framework.base_framework import baseframework
@@ -76,6 +80,21 @@ def main():
                         help="Override dataset root dir (default: from YAML)")
     parser.add_argument("--sample_index", type=int, default=0,
                         help="Index of the training sample to use")
+    # --- Env replay options ---
+    parser.add_argument("--replay_in_env", action="store_true",
+                        help="Replay predicted actions in ManiSkill sim env")
+    parser.add_argument("--video_dir", type=str,
+                        default="/work/vita/lanfeng/vlas/starvla_verify_debug",
+                        help="Directory to save env replay videos")
+    parser.add_argument("--num_envs", type=int, default=12,
+                        help="Number of parallel environments for replay")
+    parser.add_argument("--start_subset", type=int, default=0,
+                        help="First config index (inclusive) for env replay")
+    parser.add_argument("--end_subset", type=int, default=1,
+                        help="Last config index (exclusive) for env replay")
+    parser.add_argument("--split", type=str, default="train",
+                        choices=["train", "test"],
+                        help="Which split to use for env replay")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -287,7 +306,92 @@ def main():
         traceback.print_exc()
 
     # ==================================================================== #
-    # 7. Save diagnostics
+    # 7. Replay predicted actions in sim env (open-loop)
+    # ==================================================================== #
+    if args.replay_in_env:
+        logger.info("=" * 60)
+        logger.info("REPLAY PREDICTED ACTIONS IN SIM ENV")
+        logger.info("=" * 60)
+
+        from vla_align.env.config import get_env_cfg, MAX_EPISODE_STEP_WORKSPACE_EVAL
+        from vla_align.utils.env import build_endless_env
+
+        # Retrieve norm stats for unnormalization
+        state_norm_stats = norm_stats[unnorm_key]["state"]
+
+        def unnormalize_actions_min_max(normalized_actions, action_norm_stats_dict):
+            """Inverse of 2*(x-min)/(max-min)-1 → (x+1)/2*(max-min)+min"""
+            a_high = np.array(action_norm_stats_dict["max"])
+            a_low = np.array(action_norm_stats_dict["min"])
+            normalized_actions = np.clip(normalized_actions, -1, 1)
+            return (normalized_actions + 1) / 2 * (a_high - a_low) + a_low
+
+        # Get predicted normed actions from Section 6 (shape [1, 20, 8])
+        # norm_actions was set in Section 6's predict_action call
+        assert norm_actions is not None, "predict_action must succeed before env replay"
+        single_normed = norm_actions[0]  # (20, 8)
+        logger.info(f"Normed actions for replay: shape={single_normed.shape}, "
+                    f"range=[{single_normed.min():.4f}, {single_normed.max():.4f}]")
+
+        # Unnormalize
+        single_unnormed = unnormalize_actions_min_max(single_normed.copy(), action_norm_stats)
+        logger.info(f"Unnormed actions for replay: shape={single_unnormed.shape}, "
+                    f"range=[{single_unnormed.min():.4f}, {single_unnormed.max():.4f}]")
+
+        num_action_steps = single_unnormed.shape[0]  # 20
+        num_envs = args.num_envs
+
+        for cfg_idx in range(args.start_subset, args.end_subset):
+            cfg_name = f"config_{cfg_idx}"
+            subset_dir = os.path.join(args.video_dir, f"{cfg_name}_{args.split}_replay")
+            os.makedirs(subset_dir, exist_ok=True)
+
+            logger.info(f"Building env: {cfg_name} ({args.split}), {num_envs} envs")
+            scene_cfg = dict(
+                robot_init_qpos_noise=0.0,
+                cube_size_noise=0.0,
+                cfg_name=cfg_name,
+                mode=args.split,
+            )
+            env_cfg = get_env_cfg(
+                num_env=num_envs,
+                max_steps=num_action_steps,  # only run for action chunk length
+                obs_mode="rgb+segmentation",
+                scene_cfg_to_overwrite=scene_cfg,
+            )
+            envs = build_endless_env(
+                env_cfg,
+                record_video=True,
+                data_record_dir=subset_dir,
+            )
+
+            obs, _ = envs.reset()
+            device = obs["observation.state"].device
+
+            logger.info(f"Stepping {num_action_steps} actions in {num_envs} envs (open-loop) ...")
+            for t in range(num_action_steps):
+                # Broadcast the same action to all envs: (8,) → (num_envs, 8)
+                action_t = np.tile(single_unnormed[t], (num_envs, 1))  # (num_envs, 8)
+                action_tensor = torch.tensor(action_t, dtype=torch.float32, device=device)
+                obs, rew, done, info = envs.step(action_tensor)
+                if t == 0 or t == num_action_steps - 1:
+                    logger.info(f"  step {t}: action={single_unnormed[t][:4]}... "
+                                f"rew_mean={rew.float().mean():.4f}")
+
+            # Log final info
+            if "episode" in info:
+                for k, v in info["episode"].items():
+                    val = v.float().mean().item() if hasattr(v, 'float') else v
+                    logger.info(f"  final {k}: {val}")
+                    diagnostics[f"replay_{cfg_name}_{k}"] = float(val) if isinstance(val, (int, float)) else str(val)
+
+            envs.unwrapped.close()
+            logger.info(f"Replay videos saved to {subset_dir}")
+
+        diagnostics["replay_completed"] = True
+
+    # ==================================================================== #
+    # 8. Save diagnostics
     # ==================================================================== #
     diag_path = os.path.join(args.output_dir, "diagnostics.json")
     # Convert any numpy types to Python types for JSON serialization

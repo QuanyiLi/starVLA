@@ -121,7 +121,8 @@ def main():
     logger.info(f"unnorm_key = {unnorm_key}")
     logger.info(f"action_norm_stats keys = {list(action_norm_stats.keys())}")
     for k, v in action_norm_stats.items():
-        logger.info(f"  {k} = {v}")
+        # Use print() to avoid rich logging handler crash on long float lists
+        print(f"  {k} = {v}")
 
     # ==================================================================== #
     # 2. Load training dataset (same as submit_starvla_wiser.run)

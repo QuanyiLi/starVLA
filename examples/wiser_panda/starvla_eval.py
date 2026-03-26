@@ -52,7 +52,6 @@ from vla_align.utils.rollout import rollout
 # ---------------------------------------------------------------------------
 IMAGE_1_KEY = "observation.images.image_1"
 WRIST_IMAGE_KEY = "observation.images.wrist_image"
-OBS_STATE_KEY = "observation.state"
 TASK_KEY = "task"
 
 # ---------------------------------------------------------------------------
@@ -70,41 +69,7 @@ logger = logging.getLogger(__name__)
 # ======================================================================== #
 #                          Helper Functions                                  #
 # ======================================================================== #
-
-def unnormalize_actions_min_max(normalized_actions, action_norm_stats):
-    """Unnormalize using min_max mode (matching WiserPandaDataConfig).
-
-    Training normalizes via: 2 * (x - min) / (max - min) - 1
-    Inverse:                 (x + 1) / 2 * (max - min) + min
-
-    WiserPandaDataConfig uses min_max for ALL 8 dims (7 joints + 1 gripper)
-    uniformly — no binary gripper binarization, no q99 mode.
-    """
-    action_high = np.array(action_norm_stats["max"])
-    action_low = np.array(action_norm_stats["min"])
-    normalized_actions = np.clip(normalized_actions, -1, 1)
-    return (normalized_actions + 1) / 2 * (action_high - action_low) + action_low
-
-
-def normalize_state_min_max(raw_state, state_norm_stats):
-    """Normalize raw state using min_max mode (matching WiserPandaDataConfig).
-
-    Formula: 2 * (x - min) / (max - min) - 1  →  maps to [-1, 1]
-
-    Args:
-        raw_state: np.ndarray of shape (state_dim,) — raw env state.
-        state_norm_stats: dict with 'min' and 'max' lists.
-    Returns:
-        np.ndarray of same shape, normalized to [-1, 1].
-    """
-    s_min = np.array(state_norm_stats["min"])
-    s_max = np.array(state_norm_stats["max"])
-    denom = s_max - s_min
-    # Avoid division by zero where min == max (set to 0 as training does)
-    mask = denom != 0
-    normalized = np.zeros_like(raw_state, dtype=np.float32)
-    normalized[..., mask] = 2.0 * (raw_state[..., mask] - s_min[mask]) / denom[mask] - 1.0
-    return np.clip(normalized, -1, 1)
+# NOTE: normalizer is disabled — model outputs/inputs are raw values.
 
 
 # ======================================================================== #
@@ -124,15 +89,12 @@ class StarVLAChunkedPolicy:
 
     Inputs to the model:
     - 2 images (main camera + wrist camera), resized to 224×224 inside predict_action().
-    - State (9-dim q_pos), normalized with min_max before passing to model.
+    - No state input (state excluded from observations, matching default starVLA behavior).
     - CoT prompt wrapping is handled automatically inside build_qwenvl_inputs().
     """
 
-    def __init__(self, model, action_norm_stats, state_norm_stats,
-                 action_chunk_size=ACTION_CHUNK_SIZE):
+    def __init__(self, model, action_chunk_size=ACTION_CHUNK_SIZE):
         self.model = model
-        self.action_norm_stats = action_norm_stats
-        self.state_norm_stats = state_norm_stats
         self.action_chunk_size = action_chunk_size
         self._action_queues = None  # lazily initialized
         self._first_inference_done = False
@@ -154,7 +116,7 @@ class StarVLAChunkedPolicy:
             policy_info:    dict with timing / diagnostic info
         """
         num_envs = obs[IMAGE_1_KEY].shape[0]
-        device = obs[OBS_STATE_KEY].device
+        device = obs[IMAGE_1_KEY].device
 
         # Lazy init queues
         if self._action_queues is None:
@@ -173,46 +135,37 @@ class StarVLAChunkedPolicy:
             # Convert env obs → model input format
             images_np = obs[IMAGE_1_KEY].cpu().numpy()  # (B, H, W, C) uint8
             wrist_np = obs[WRIST_IMAGE_KEY].cpu().numpy()  # (B, H, W, C) uint8
-            state_np = obs[OBS_STATE_KEY].cpu().numpy()    # (B, state_dim) float
             instructions = batch_tensor_to_string(obs[TASK_KEY])
 
             examples = []
             for i in range(num_envs):
-                # Normalize state with min_max (same as training)
-                norm_state = normalize_state_min_max(
-                    state_np[i], self.state_norm_stats
-                )
                 # Resize images to 224x224 (same as training _pack_sample)
                 main_img = Image.fromarray(images_np[i]).resize((224, 224))
                 wrist_img = Image.fromarray(wrist_np[i]).resize((224, 224))
                 examples.append({
                     "image": [main_img, wrist_img],
                     "lang": instructions[i],
-                    "state": norm_state[np.newaxis, :].astype(np.float16),  # (1, state_dim)
                 })
 
             with torch.no_grad():
                 output = self.model.predict_action(examples=examples)
-                norm_actions = output["normalized_actions"]  # (B, chunk, action_dim)
+                pred_actions = output["normalized_actions"]  # raw actions (no normalizer)
 
             # Diagnostic on first call
             if not self._first_inference_done:
-                logger.info(f"[DIAG] norm_actions shape={norm_actions.shape}, "
-                            f"range=[{norm_actions.min():.4f}, {norm_actions.max():.4f}]")
+                logger.info(f"[DIAG] pred_actions shape={pred_actions.shape}, "
+                            f"range=[{pred_actions.min():.4f}, {pred_actions.max():.4f}]")
                 for env_i, inst in enumerate(instructions):
                     logger.info(f"[DIAG] env {env_i} lang: '{inst}'")
 
-            # Unnormalize and fill queues
+            # Fill queues with raw predicted actions (no unnormalization needed)
             for i in range(num_envs):
-                unnorm = unnormalize_actions_min_max(
-                    norm_actions[i].copy(), self.action_norm_stats
-                )
-                self._action_queues[i] = unnorm
+                self._action_queues[i] = pred_actions[i].copy()
 
             if not self._first_inference_done:
-                u0 = self._action_queues[0]
-                logger.info(f"[DIAG] unnorm_actions[0] shape={u0.shape}, "
-                            f"range=[{u0.min():.4f}, {u0.max():.4f}]")
+                a0 = self._action_queues[0]
+                logger.info(f"[DIAG] actions[0] shape={a0.shape}, "
+                            f"range=[{a0.min():.4f}, {a0.max():.4f}]")
                 self._first_inference_done = True
 
             policy_info["inference_time"] = time.perf_counter() - t0
@@ -308,32 +261,9 @@ def run_eval(args):
         model.action_model.num_inference_timesteps = args.denoise_timesteps
 
     # ------------------------------------------------------------------ #
-    # Retrieve action normalization statistics
+    # Build policy wrapper (no normalization — raw actions used directly)
     # ------------------------------------------------------------------ #
-    norm_stats = model.norm_stats
-    unnorm_key = next(iter(norm_stats.keys()))
-    action_norm_stats = norm_stats[unnorm_key]["action"]
-    state_norm_stats = norm_stats[unnorm_key]["state"]
-
-    logger.info(f"unnorm_key = {unnorm_key}")
-    logger.info(f"action min = {action_norm_stats.get('min', 'MISSING')}")
-    logger.info(f"action max = {action_norm_stats.get('max', 'MISSING')}")
-    logger.info(f"state min  = {state_norm_stats.get('min', 'MISSING')}")
-    logger.info(f"state max  = {state_norm_stats.get('max', 'MISSING')}")
-
-    assert "min" in action_norm_stats and "max" in action_norm_stats, (
-        f"action_norm_stats must contain 'min' and 'max' keys for min_max "
-        f"unnormalization, but got keys: {list(action_norm_stats.keys())}"
-    )
-    assert "min" in state_norm_stats and "max" in state_norm_stats, (
-        f"state_norm_stats must contain 'min' and 'max' keys for min_max "
-        f"normalization, but got keys: {list(state_norm_stats.keys())}"
-    )
-
-    # ------------------------------------------------------------------ #
-    # Build policy wrapper
-    # ------------------------------------------------------------------ #
-    policy = StarVLAChunkedPolicy(model, action_norm_stats, state_norm_stats)
+    policy = StarVLAChunkedPolicy(model)
 
     # ------------------------------------------------------------------ #
     # Determine splits

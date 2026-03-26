@@ -1032,22 +1032,8 @@ class WiserPandaDataConfig:
 
     def transform(self):
         transforms = [
-            # state transforms
-            StateActionToTensor(apply_to=self.state_keys),
-            StateActionTransform(
-                apply_to=self.state_keys,
-                normalization_modes={
-                    "state.q_pos": "min_max",
-                },
-            ),
             # action transforms
             StateActionToTensor(apply_to=self.action_keys),
-            StateActionTransform(
-                apply_to=self.action_keys,
-                normalization_modes={
-                    "action.q_pos": "min_max",
-                },
-            ),
         ]
 
         return ComposedModalityTransform(transforms=transforms)

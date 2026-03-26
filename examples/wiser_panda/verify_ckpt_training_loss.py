@@ -273,14 +273,6 @@ def main():
             logger.info(f"Sample 0 — lang: '{lang}'")
             diagnostics["sample_0_lang"] = str(lang)
 
-            if "state" in s0:
-                state_np = np.array(s0["state"])
-                state_d = describe("state", state_np)
-                logger.info(f"Sample 0 — state: shape={state_d['shape']}, "
-                            f"range=[{state_d['min']:.6f}, {state_d['max']:.6f}]")
-                diagnostics["sample_0_state"] = state_d
-            else:
-                logger.info("Sample 0 — state: NOT present")
 
         # --- EXACT training forward pass ---
         t0 = time.perf_counter()
@@ -350,8 +342,8 @@ def main():
         try:
             with torch.no_grad():
                 pred_output = model.predict_action(examples=batch)
-            norm_actions = pred_output["normalized_actions"]
-            d = describe("predicted_normalized_actions", norm_actions)
+            pred_actions = pred_output["normalized_actions"]  # raw actions (no normalizer)
+            d = describe("predicted_actions", pred_actions)
             logger.info(f"  pred actions: shape={d['shape']}, range=[{d['min']:.6f}, {d['max']:.6f}], "
                         f"mean={d['mean']:.6f}, std={d['std']:.6f}")
             diagnostics["predicted_actions"] = d
@@ -359,16 +351,16 @@ def main():
             gt_action = np.array(batch[0]["action"], dtype=np.float64)
             future_window = cfg.framework.action_model.future_action_window_size
             gt_target = gt_action[-(future_window + 1):, :]
-            pred_single = norm_actions[0]
+            pred_single = pred_actions[0]
 
             if pred_single.shape == gt_target.shape:
                 mse = float(np.mean((pred_single.astype(np.float64) - gt_target) ** 2))
-                logger.info(f"  MSE (pred vs GT normalized): {mse:.6f}")
+                logger.info(f"  MSE (pred vs GT): {mse:.6f}")
                 diagnostics["pred_vs_gt_mse"] = mse
             else:
                 logger.warning(f"  Shape mismatch: pred={pred_single.shape} vs gt_target={gt_target.shape}")
 
-            np.save(os.path.join(args.output_dir, "predicted_actions.npy"), norm_actions)
+            np.save(os.path.join(args.output_dir, "predicted_actions.npy"), pred_actions)
             np.save(os.path.join(args.output_dir, "gt_actions.npy"), gt_action)
         except Exception as e:
             logger.error(f"  predict_action FAILED: {e}")

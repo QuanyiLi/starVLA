@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --gpus-per-node=4
-#SBATCH --nodes=3
+#SBATCH --nodes=2
 #SBATCH --time=48:00:00
 #SBATCH --mem=200G
 
@@ -25,7 +25,7 @@ mkdir -p ${output_dir}
 cp $0 ${output_dir}/
 
 srun torchrun \
-    --nnodes=3 \
+    --nnodes=2 \
     --nproc_per_node=4 \
     --rdzv_id=$SLURM_JOB_ID \
     --rdzv_backend=c10d \

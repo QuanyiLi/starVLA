@@ -113,19 +113,7 @@ def main():
     model = model.to(device).eval()
     logger.info("Model loaded successfully")
 
-    # Log norm stats
-    norm_stats = model.norm_stats
-    unnorm_key = next(iter(norm_stats.keys()))
-    action_norm_stats = norm_stats[unnorm_key]["action"]
-    diagnostics["unnorm_key"] = unnorm_key
-    diagnostics["action_norm_stats"] = {
-        k: v if isinstance(v, list) else str(v) for k, v in action_norm_stats.items()
-    }
-    logger.info(f"unnorm_key = {unnorm_key}")
-    logger.info(f"action_norm_stats keys = {list(action_norm_stats.keys())}")
-    for k, v in action_norm_stats.items():
-        # Use print() to avoid rich logging handler crash on long float lists
-        print(f"  {k} = {v}")
+    # NOTE: normalizer is disabled — model outputs raw actions directly
 
     # ==================================================================== #
     # 2. Load training dataset (same as submit_starvla_wiser.run)
@@ -166,15 +154,6 @@ def main():
     logger.info(f"action: shape={d['shape']}, dtype={d['dtype']}, "
                 f"range=[{d['min']:.6f}, {d['max']:.6f}], mean={d['mean']:.6f}")
 
-    # -- State (if present) --
-    if "state" in sample:
-        state = sample["state"]
-        d = describe_tensor_or_array("state", state)
-        input_diags.append(d)
-        logger.info(f"state: shape={d['shape']}, dtype={d['dtype']}, "
-                    f"range=[{d['min']:.6f}, {d['max']:.6f}], mean={d['mean']:.6f}")
-    else:
-        logger.info("state: NOT present in sample")
 
     # -- Images --
     images = sample["image"]
@@ -268,15 +247,15 @@ def main():
     try:
         with torch.no_grad():
             pred_output = model.predict_action(examples=batch)
-        norm_actions = pred_output["normalized_actions"]
-        d = describe_tensor_or_array("predicted_normalized_actions", norm_actions)
-        logger.info(f"predicted normalized actions: shape={d['shape']}, "
+        pred_actions = pred_output["normalized_actions"]  # raw actions (no normalizer)
+        d = describe_tensor_or_array("predicted_actions", pred_actions)
+        logger.info(f"predicted actions: shape={d['shape']}, "
                     f"range=[{d['min']:.6f}, {d['max']:.6f}], mean={d['mean']:.6f}, std={d['std']:.6f}")
         diagnostics["predicted_actions"] = d
 
         # Compare with ground truth
         gt_action = np.array(sample["action"], dtype=np.float64)
-        pred_action = norm_actions[0]  # first (only) sample in batch
+        pred_action = pred_actions[0]  # first (only) sample in batch
 
         # The GT action shape is [chunk, action_dim], pred is also [chunk, action_dim]
         # But the model predicts only the last (future_action_window_size+1) steps
@@ -285,7 +264,7 @@ def main():
 
         if pred_action.shape == gt_target.shape:
             mse = float(np.mean((pred_action.astype(np.float64) - gt_target.astype(np.float64))**2))
-            logger.info(f"MSE between predicted and GT (normalized): {mse:.6f}")
+            logger.info(f"MSE between predicted and GT: {mse:.6f}")
             diagnostics["pred_vs_gt_mse"] = mse
 
             per_dim_mse = np.mean((pred_action.astype(np.float64) - gt_target.astype(np.float64))**2, axis=0)
@@ -299,7 +278,7 @@ def main():
             }
 
         # Save predicted and GT actions
-        np.save(os.path.join(args.output_dir, "predicted_actions.npy"), norm_actions)
+        np.save(os.path.join(args.output_dir, "predicted_actions.npy"), pred_actions)
         np.save(os.path.join(args.output_dir, "gt_actions.npy"), gt_action)
         logger.info("Saved predicted_actions.npy and gt_actions.npy")
 
@@ -321,76 +300,54 @@ def main():
             from vla_align.env.config import get_env_cfg, MAX_EPISODE_STEP_WORKSPACE_EVAL
             from vla_align.utils.env import build_endless_env
 
-            # Retrieve norm stats for unnormalization
-            state_norm_stats = norm_stats[unnorm_key]["state"]
-
-            def unnormalize_actions_min_max(normalized_actions, action_norm_stats_dict):
-                """Inverse of 2*(x-min)/(max-min)-1 → (x+1)/2*(max-min)+min"""
-                a_high = np.array(action_norm_stats_dict["max"])
-                a_low = np.array(action_norm_stats_dict["min"])
-                normalized_actions = np.clip(normalized_actions, -1, 1)
-                return (normalized_actions + 1) / 2 * (a_high - a_low) + a_low
-
             # Select action source: GT from dataset or predicted from model
+            # NOTE: no unnormalization needed — normalizer is disabled
             if args.use_gt_action:
                 gt_action_all = np.array(sample["action"], dtype=np.float64)  # (chunk, 8)
                 # Use the last 20 steps (same slice as training target)
                 future_window = model.config.framework.action_model.future_action_window_size
-                single_normed = gt_action_all[-(future_window + 1):, :]  # (20, 8)
+                replay_actions = gt_action_all[-(future_window + 1):, :]  # (20, 8)
                 logger.info(f"Using GT actions for replay (from dataset)")
             else:
-                # Get predicted normed actions from Section 6 (shape [1, 20, 8])
-                assert norm_actions is not None, "predict_action must succeed before env replay"
-                single_normed = norm_actions[0]  # (20, 8)
+                # Get predicted actions from Section 6 (shape [1, 20, 8])
+                assert pred_actions is not None, "predict_action must succeed before env replay"
+                replay_actions = np.array(pred_actions[0], dtype=np.float64)  # (20, 8)
                 logger.info(f"Using PREDICTED actions for replay (from model)")
 
-            logger.info(f"Normed actions for replay: shape={single_normed.shape}, "
-                        f"range=[{single_normed.min():.4f}, {single_normed.max():.4f}]")
+            logger.info(f"Actions for replay: shape={replay_actions.shape}, "
+                        f"range=[{replay_actions.min():.4f}, {replay_actions.max():.4f}]")
 
-            # Unnormalize
-            single_unnormed = unnormalize_actions_min_max(single_normed.copy(), action_norm_stats)
-            logger.info(f"Unnormed actions for replay: shape={single_unnormed.shape}, "
-                        f"range=[{single_unnormed.min():.4f}, {single_unnormed.max():.4f}]")
-
-            # --- Compare GT vs Predicted (both normed and unnormed) ---
+            # --- Compare GT vs Predicted ---
             gt_action_all = np.array(sample["action"], dtype=np.float64)
             future_window = model.config.framework.action_model.future_action_window_size
-            gt_normed = gt_action_all[-(future_window + 1):, :]
-            gt_unnormed = unnormalize_actions_min_max(gt_normed.copy(), action_norm_stats)
+            gt_target = gt_action_all[-(future_window + 1):, :]
 
-            if norm_actions is not None:
-                pred_normed = np.array(norm_actions[0], dtype=np.float64)
-                pred_unnormed = unnormalize_actions_min_max(pred_normed.copy(), action_norm_stats)
+            if pred_actions is not None:
+                pred_action_np = np.array(pred_actions[0], dtype=np.float64)
 
-                normed_mse = np.mean((pred_normed - gt_normed) ** 2, axis=0)
-                unnormed_mse = np.mean((pred_unnormed - gt_unnormed) ** 2, axis=0)
-                a_range = np.array(action_norm_stats["max"]) - np.array(action_norm_stats["min"])
-                amplification = a_range / 2.0  # unnorm amplifies error by this factor
+                per_dim_mse = np.mean((pred_action_np - gt_target) ** 2, axis=0)
 
                 print("=" * 60)
                 print("GT vs PREDICTED action comparison (per-dimension)")
-                print(f"{'dim':>4} {'normed_MSE':>12} {'unnormed_MSE':>14} {'range':>10} {'amplify':>10}")
-                for d in range(len(normed_mse)):
-                    print(f"  {d:>2}   {normed_mse[d]:12.6f}   {unnormed_mse[d]:14.6f}   "
-                          f"{a_range[d]:10.4f}   {amplification[d]:10.4f}")
-                print(f" ALL   {normed_mse.mean():12.6f}   {unnormed_mse.mean():14.6f}")
+                print(f"{'dim':>4} {'MSE':>12}")
+                for d in range(len(per_dim_mse)):
+                    print(f"  {d:>2}   {per_dim_mse[d]:12.6f}")
+                print(f" ALL   {per_dim_mse.mean():12.6f}")
                 print("=" * 60)
 
-                diagnostics["gt_vs_pred_normed_mse_per_dim"] = normed_mse.tolist()
-                diagnostics["gt_vs_pred_unnormed_mse_per_dim"] = unnormed_mse.tolist()
-                diagnostics["action_range_per_dim"] = a_range.tolist()
+                diagnostics["gt_vs_pred_mse_per_dim"] = per_dim_mse.tolist()
 
-            # Save unnormed actions for inspection
+            # Save actions for inspection
             tag = "gt" if args.use_gt_action else "pred"
-            np.save(os.path.join(args.output_dir, f"replay_unnormed_actions_{tag}.npy"), single_unnormed)
-            np.save(os.path.join(args.output_dir, "gt_unnormed_actions.npy"), gt_unnormed)
-            if norm_actions is not None:
-                np.save(os.path.join(args.output_dir, "pred_unnormed_actions.npy"), pred_unnormed)
-            logger.info(f"Saved replay_unnormed_actions_{tag}.npy + gt/pred unnormed actions")
+            np.save(os.path.join(args.output_dir, f"replay_actions_{tag}.npy"), replay_actions)
+            np.save(os.path.join(args.output_dir, "gt_actions_target.npy"), gt_target)
+            if pred_actions is not None:
+                np.save(os.path.join(args.output_dir, "pred_actions.npy"), pred_action_np)
+            logger.info(f"Saved replay_actions_{tag}.npy + gt/pred actions")
 
             from vla_align.utils.rollout import rollout
 
-            num_action_steps = single_unnormed.shape[0]  # 20
+            num_action_steps = replay_actions.shape[0]  # 20
             num_envs = args.num_envs
 
             # Policy wrapper that replays pre-computed actions (no inference)
@@ -413,7 +370,7 @@ def main():
                     self._step += 1
                     return action_tensor, action_tensor, {"inference_time": 0.0}
 
-            replay_policy = PrecomputedPolicy(single_unnormed)
+            replay_policy = PrecomputedPolicy(replay_actions)
 
             for cfg_idx in range(args.start_subset, args.end_subset):
                 cfg_name = f"config_{cfg_idx}"

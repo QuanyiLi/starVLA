@@ -96,6 +96,8 @@ def main():
     parser.add_argument("--split", type=str, default="train",
                         choices=["train", "test"],
                         help="Which split to use for env replay")
+    parser.add_argument("--use_gt_action", action="store_true",
+                        help="Use ground truth actions from dataset instead of model predictions")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -329,10 +331,19 @@ def main():
                 normalized_actions = np.clip(normalized_actions, -1, 1)
                 return (normalized_actions + 1) / 2 * (a_high - a_low) + a_low
 
-            # Get predicted normed actions from Section 6 (shape [1, 20, 8])
-            # norm_actions was set in Section 6's predict_action call
-            assert norm_actions is not None, "predict_action must succeed before env replay"
-            single_normed = norm_actions[0]  # (20, 8)
+            # Select action source: GT from dataset or predicted from model
+            if args.use_gt_action:
+                gt_action_all = np.array(sample["action"], dtype=np.float64)  # (chunk, 8)
+                # Use the last 20 steps (same slice as training target)
+                future_window = model.config.framework.action_model.future_action_window_size
+                single_normed = gt_action_all[-(future_window + 1):, :]  # (20, 8)
+                logger.info(f"Using GT actions for replay (from dataset)")
+            else:
+                # Get predicted normed actions from Section 6 (shape [1, 20, 8])
+                assert norm_actions is not None, "predict_action must succeed before env replay"
+                single_normed = norm_actions[0]  # (20, 8)
+                logger.info(f"Using PREDICTED actions for replay (from model)")
+
             logger.info(f"Normed actions for replay: shape={single_normed.shape}, "
                         f"range=[{single_normed.min():.4f}, {single_normed.max():.4f}]")
 
@@ -342,8 +353,9 @@ def main():
                         f"range=[{single_unnormed.min():.4f}, {single_unnormed.max():.4f}]")
 
             # Save unnormed actions for inspection
-            np.save(os.path.join(args.output_dir, "replay_unnormed_actions.npy"), single_unnormed)
-            logger.info("Saved replay_unnormed_actions.npy")
+            tag = "gt" if args.use_gt_action else "pred"
+            np.save(os.path.join(args.output_dir, f"replay_unnormed_actions_{tag}.npy"), single_unnormed)
+            logger.info(f"Saved replay_unnormed_actions_{tag}.npy")
 
             num_action_steps = single_unnormed.shape[0]  # 20
             num_envs = args.num_envs

@@ -34,6 +34,7 @@ CUDA_VISIBLE_DEVICES=0 python "${VERIFY_SCRIPT}" \
     --output_dir "${OUTPUT_DIR}" \
     --sample_index 0 \
     --replay_in_env \
+    --use_gt_action \
     --video_dir "${VIDEO_DIR}" \
     --num_envs 12 \
     --start_subset 0 --end_subset 1 \

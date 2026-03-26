@@ -314,82 +314,93 @@ def main():
         logger.info("REPLAY PREDICTED ACTIONS IN SIM ENV")
         logger.info("=" * 60)
 
-        from vla_align.env.config import get_env_cfg, MAX_EPISODE_STEP_WORKSPACE_EVAL
-        from vla_align.utils.env import build_endless_env
+        try:
+            from vla_align.env.config import get_env_cfg, MAX_EPISODE_STEP_WORKSPACE_EVAL
+            from vla_align.utils.env import build_endless_env
 
-        # Retrieve norm stats for unnormalization
-        state_norm_stats = norm_stats[unnorm_key]["state"]
+            # Retrieve norm stats for unnormalization
+            state_norm_stats = norm_stats[unnorm_key]["state"]
 
-        def unnormalize_actions_min_max(normalized_actions, action_norm_stats_dict):
-            """Inverse of 2*(x-min)/(max-min)-1 → (x+1)/2*(max-min)+min"""
-            a_high = np.array(action_norm_stats_dict["max"])
-            a_low = np.array(action_norm_stats_dict["min"])
-            normalized_actions = np.clip(normalized_actions, -1, 1)
-            return (normalized_actions + 1) / 2 * (a_high - a_low) + a_low
+            def unnormalize_actions_min_max(normalized_actions, action_norm_stats_dict):
+                """Inverse of 2*(x-min)/(max-min)-1 → (x+1)/2*(max-min)+min"""
+                a_high = np.array(action_norm_stats_dict["max"])
+                a_low = np.array(action_norm_stats_dict["min"])
+                normalized_actions = np.clip(normalized_actions, -1, 1)
+                return (normalized_actions + 1) / 2 * (a_high - a_low) + a_low
 
-        # Get predicted normed actions from Section 6 (shape [1, 20, 8])
-        # norm_actions was set in Section 6's predict_action call
-        assert norm_actions is not None, "predict_action must succeed before env replay"
-        single_normed = norm_actions[0]  # (20, 8)
-        logger.info(f"Normed actions for replay: shape={single_normed.shape}, "
-                    f"range=[{single_normed.min():.4f}, {single_normed.max():.4f}]")
+            # Get predicted normed actions from Section 6 (shape [1, 20, 8])
+            # norm_actions was set in Section 6's predict_action call
+            assert norm_actions is not None, "predict_action must succeed before env replay"
+            single_normed = norm_actions[0]  # (20, 8)
+            logger.info(f"Normed actions for replay: shape={single_normed.shape}, "
+                        f"range=[{single_normed.min():.4f}, {single_normed.max():.4f}]")
 
-        # Unnormalize
-        single_unnormed = unnormalize_actions_min_max(single_normed.copy(), action_norm_stats)
-        logger.info(f"Unnormed actions for replay: shape={single_unnormed.shape}, "
-                    f"range=[{single_unnormed.min():.4f}, {single_unnormed.max():.4f}]")
+            # Unnormalize
+            single_unnormed = unnormalize_actions_min_max(single_normed.copy(), action_norm_stats)
+            logger.info(f"Unnormed actions for replay: shape={single_unnormed.shape}, "
+                        f"range=[{single_unnormed.min():.4f}, {single_unnormed.max():.4f}]")
 
-        num_action_steps = single_unnormed.shape[0]  # 20
-        num_envs = args.num_envs
+            # Save unnormed actions for inspection
+            np.save(os.path.join(args.output_dir, "replay_unnormed_actions.npy"), single_unnormed)
+            logger.info("Saved replay_unnormed_actions.npy")
 
-        for cfg_idx in range(args.start_subset, args.end_subset):
-            cfg_name = f"config_{cfg_idx}"
-            subset_dir = os.path.join(args.video_dir, f"{cfg_name}_{args.split}_replay")
-            os.makedirs(subset_dir, exist_ok=True)
+            num_action_steps = single_unnormed.shape[0]  # 20
+            num_envs = args.num_envs
 
-            logger.info(f"Building env: {cfg_name} ({args.split}), {num_envs} envs")
-            scene_cfg = dict(
-                robot_init_qpos_noise=0.0,
-                cube_size_noise=0.0,
-                cfg_name=cfg_name,
-                mode=args.split,
-            )
-            env_cfg = get_env_cfg(
-                num_env=num_envs,
-                max_steps=num_action_steps,  # only run for action chunk length
-                obs_mode="rgb+segmentation",
-                scene_cfg_to_overwrite=scene_cfg,
-            )
-            envs = build_endless_env(
-                env_cfg,
-                record_video=True,
-                data_record_dir=subset_dir,
-            )
+            for cfg_idx in range(args.start_subset, args.end_subset):
+                cfg_name = f"config_{cfg_idx}"
+                subset_dir = os.path.join(args.video_dir, f"{cfg_name}_{args.split}_replay")
+                os.makedirs(subset_dir, exist_ok=True)
 
-            obs, _ = envs.reset()
-            device = obs["observation.state"].device
+                logger.info(f"Building env: {cfg_name} ({args.split}), {num_envs} envs")
+                scene_cfg = dict(
+                    robot_init_qpos_noise=0.0,
+                    cube_size_noise=0.0,
+                    cfg_name=cfg_name,
+                    mode=args.split,
+                )
+                env_cfg = get_env_cfg(
+                    num_env=num_envs,
+                    max_steps=num_action_steps,  # only run for action chunk length
+                    obs_mode="rgb+segmentation",
+                    scene_cfg_to_overwrite=scene_cfg,
+                )
+                envs = build_endless_env(
+                    env_cfg,
+                    record_video=True,
+                    data_record_dir=subset_dir,
+                )
 
-            logger.info(f"Stepping {num_action_steps} actions in {num_envs} envs (open-loop) ...")
-            for t in range(num_action_steps):
-                # Broadcast the same action to all envs: (8,) → (num_envs, 8)
-                action_t = np.tile(single_unnormed[t], (num_envs, 1))  # (num_envs, 8)
-                action_tensor = torch.tensor(action_t, dtype=torch.float32, device=device)
-                obs, rew, done, info = envs.step(action_tensor)
-                if t == 0 or t == num_action_steps - 1:
-                    logger.info(f"  step {t}: action={single_unnormed[t][:4]}... "
-                                f"rew_mean={rew.float().mean():.4f}")
+                obs, _ = envs.reset()
+                device = obs["observation.state"].device
 
-            # Log final info
-            if "episode" in info:
-                for k, v in info["episode"].items():
-                    val = v.float().mean().item() if hasattr(v, 'float') else v
-                    logger.info(f"  final {k}: {val}")
-                    diagnostics[f"replay_{cfg_name}_{k}"] = float(val) if isinstance(val, (int, float)) else str(val)
+                logger.info(f"Stepping {num_action_steps} actions in {num_envs} envs (open-loop) ...")
+                for t in range(num_action_steps):
+                    # Broadcast the same action to all envs: (8,) → (num_envs, 8)
+                    action_t = np.tile(single_unnormed[t], (num_envs, 1))  # (num_envs, 8)
+                    action_tensor = torch.tensor(action_t, dtype=torch.float32, device=device)
+                    obs, rew, done, info = envs.step(action_tensor)
+                    if t == 0 or t == num_action_steps - 1:
+                        logger.info(f"  step {t}: action={single_unnormed[t][:4]}... "
+                                    f"rew_mean={rew.float().mean():.4f}")
 
-            envs.unwrapped.close()
-            logger.info(f"Replay videos saved to {subset_dir}")
+                # Log final info
+                if "episode" in info:
+                    for k, v in info["episode"].items():
+                        val = v.float().mean().item() if hasattr(v, 'float') else v
+                        logger.info(f"  final {k}: {val}")
+                        diagnostics[f"replay_{cfg_name}_{k}"] = float(val) if isinstance(val, (int, float)) else str(val)
 
-        diagnostics["replay_completed"] = True
+                envs.unwrapped.close()
+                logger.info(f"Replay videos saved to {subset_dir}")
+
+            diagnostics["replay_completed"] = True
+
+        except Exception as e:
+            logger.error(f"Env replay FAILED: {e}")
+            diagnostics["replay_error"] = str(e)
+            import traceback
+            traceback.print_exc()
 
     # ==================================================================== #
     # 8. Save diagnostics

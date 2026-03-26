@@ -21,6 +21,7 @@ import os
 import sys
 from pathlib import Path
 
+import cv2  # must be imported before PIL to avoid libpng/zlib conflict
 import numpy as np
 import torch
 from PIL import Image

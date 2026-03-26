@@ -352,10 +352,41 @@ def main():
             logger.info(f"Unnormed actions for replay: shape={single_unnormed.shape}, "
                         f"range=[{single_unnormed.min():.4f}, {single_unnormed.max():.4f}]")
 
+            # --- Compare GT vs Predicted (both normed and unnormed) ---
+            gt_action_all = np.array(sample["action"], dtype=np.float64)
+            future_window = model.config.framework.action_model.future_action_window_size
+            gt_normed = gt_action_all[-(future_window + 1):, :]
+            gt_unnormed = unnormalize_actions_min_max(gt_normed.copy(), action_norm_stats)
+
+            if norm_actions is not None:
+                pred_normed = np.array(norm_actions[0], dtype=np.float64)
+                pred_unnormed = unnormalize_actions_min_max(pred_normed.copy(), action_norm_stats)
+
+                normed_mse = np.mean((pred_normed - gt_normed) ** 2, axis=0)
+                unnormed_mse = np.mean((pred_unnormed - gt_unnormed) ** 2, axis=0)
+                a_range = np.array(action_norm_stats["max"]) - np.array(action_norm_stats["min"])
+                amplification = a_range / 2.0  # unnorm amplifies error by this factor
+
+                print("=" * 60)
+                print("GT vs PREDICTED action comparison (per-dimension)")
+                print(f"{'dim':>4} {'normed_MSE':>12} {'unnormed_MSE':>14} {'range':>10} {'amplify':>10}")
+                for d in range(len(normed_mse)):
+                    print(f"  {d:>2}   {normed_mse[d]:12.6f}   {unnormed_mse[d]:14.6f}   "
+                          f"{a_range[d]:10.4f}   {amplification[d]:10.4f}")
+                print(f" ALL   {normed_mse.mean():12.6f}   {unnormed_mse.mean():14.6f}")
+                print("=" * 60)
+
+                diagnostics["gt_vs_pred_normed_mse_per_dim"] = normed_mse.tolist()
+                diagnostics["gt_vs_pred_unnormed_mse_per_dim"] = unnormed_mse.tolist()
+                diagnostics["action_range_per_dim"] = a_range.tolist()
+
             # Save unnormed actions for inspection
             tag = "gt" if args.use_gt_action else "pred"
             np.save(os.path.join(args.output_dir, f"replay_unnormed_actions_{tag}.npy"), single_unnormed)
-            logger.info(f"Saved replay_unnormed_actions_{tag}.npy")
+            np.save(os.path.join(args.output_dir, "gt_unnormed_actions.npy"), gt_unnormed)
+            if norm_actions is not None:
+                np.save(os.path.join(args.output_dir, "pred_unnormed_actions.npy"), pred_unnormed)
+            logger.info(f"Saved replay_unnormed_actions_{tag}.npy + gt/pred unnormed actions")
 
             from vla_align.utils.rollout import rollout
 

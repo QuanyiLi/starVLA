@@ -357,8 +357,32 @@ def main():
             np.save(os.path.join(args.output_dir, f"replay_unnormed_actions_{tag}.npy"), single_unnormed)
             logger.info(f"Saved replay_unnormed_actions_{tag}.npy")
 
+            from vla_align.utils.rollout import rollout
+
             num_action_steps = single_unnormed.shape[0]  # 20
             num_envs = args.num_envs
+
+            # Policy wrapper that replays pre-computed actions (no inference)
+            class PrecomputedPolicy:
+                """Replays a fixed action sequence, broadcasting to all envs."""
+                def __init__(self, actions_seq):
+                    self._actions = actions_seq  # (T, action_dim)
+                    self._step = 0
+
+                def reset(self):
+                    self._step = 0
+
+                def __call__(self, obs):
+                    n = obs["observation.state"].shape[0]
+                    device = obs["observation.state"].device
+                    # Clamp step to last action if env runs longer than action chunk
+                    t = min(self._step, len(self._actions) - 1)
+                    action_t = np.tile(self._actions[t], (n, 1))
+                    action_tensor = torch.tensor(action_t, dtype=torch.float32, device=device)
+                    self._step += 1
+                    return action_tensor, action_tensor, {"inference_time": 0.0}
+
+            replay_policy = PrecomputedPolicy(single_unnormed)
 
             for cfg_idx in range(args.start_subset, args.end_subset):
                 cfg_name = f"config_{cfg_idx}"
@@ -384,25 +408,19 @@ def main():
                     data_record_dir=subset_dir,
                 )
 
-                obs, _ = envs.reset()
-                device = obs["observation.state"].device
+                replay_policy.reset()
+                results = rollout(
+                    envs,
+                    replay_policy,
+                    round_to_collect=1,
+                    demo_saving_dir=subset_dir,
+                    indices_to_save=None,
+                )
 
-                logger.info(f"Stepping {num_action_steps} actions in {num_envs} envs (open-loop) ...")
-                for t in range(num_action_steps):
-                    # Broadcast the same action to all envs: (8,) → (num_envs, 8)
-                    action_t = np.tile(single_unnormed[t], (num_envs, 1))  # (num_envs, 8)
-                    action_tensor = torch.tensor(action_t, dtype=torch.float32, device=device)
-                    obs, rew, done, info = envs.step(action_tensor)
-                    if t == 0 or t == num_action_steps - 1:
-                        logger.info(f"  step {t}: action={single_unnormed[t][:4]}... "
-                                    f"rew_mean={rew.float().mean():.4f}")
-
-                # Log final info
-                if "episode" in info:
-                    for k, v in info["episode"].items():
-                        val = v.float().mean().item() if hasattr(v, 'float') else v
-                        logger.info(f"  final {k}: {val}")
-                        diagnostics[f"replay_{cfg_name}_{k}"] = float(val) if isinstance(val, (int, float)) else str(val)
+                logger.info(f"Replay results for {cfg_name}:")
+                for k, v in results.items():
+                    logger.info(f"  {k}: {v}")
+                    diagnostics[f"replay_{cfg_name}_{k}"] = v
 
                 envs.unwrapped.close()
                 logger.info(f"Replay videos saved to {subset_dir}")
